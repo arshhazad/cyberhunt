@@ -1,23 +1,23 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Canvas, useThree } from '@react-three/fiber'
-import { OrbitControls, Html, useTexture } from '@react-three/drei'
+import { Html, PointerLockControls, useTexture } from '@react-three/drei'
 import * as THREE from 'three'
 
 /**
- * Cyber Hunt — City Upgrade (static environment)
- * - Roads every 10 tiles (asphalt + neon lane)
- * - Pavement tiles elsewhere (matte)
- * - Static buildings placed sparsely on pavements
- * - Static cars parked along roads
- * - Night sky background (equirect)
- * - Treasure hunt logic unchanged
+ * Cyber Hunt — Street Pack (static city, street-level)
+ * - First-person street view with WASD (press click to lock pointer)
+ * - Sunlight + shadows + ACES tone mapping
+ * - Road with double yellow center + sidewalks
+ * - Rows of textured buildings + parked cars
+ * - Click to DIG a 1x1 tile under the crosshair
+ * - Treasure/dig logic preserved
  */
 
 const WORLD_W = 3163
 const WORLD_H = 3162
-const VIEW_W = 200
-const VIEW_H = 200
+const VIEW_W = 120   // smaller viewport at street level for perf
+const VIEW_H = 120
 const TILE_SIZE = 1
 const DAILY_FREE_DIGS = 1
 
@@ -34,10 +34,7 @@ const KEY = {
 const todayStr = () => new Date().toISOString().slice(0,10)
 const clamp = (v:number,a:number,b:number)=>Math.max(a,Math.min(b,v))
 const randInt = (min:number,max:number)=>Math.floor(Math.random()*(max-min+1))+min
-function seeded(x:number,y:number){ // stable noise-ish
-  const s = Math.sin(x*127.1 + y*311.7) * 43758.5453
-  return s - Math.floor(s)
-}
+function seeded(x:number,y:number){ const s=Math.sin(x*127.1+y*311.7)*43758.5453; return s-Math.floor(s) }
 
 function getOrCreateUser() {
   const existing = localStorage.getItem(KEY.USER)
@@ -48,7 +45,6 @@ function getOrCreateUser() {
   localStorage.setItem(KEY.USER, JSON.stringify(user))
   return user
 }
-
 function getTreasure() {
   let t = localStorage.getItem(KEY.TREASURE)
   if (t) return JSON.parse(t)
@@ -59,7 +55,6 @@ function getTreasure() {
   localStorage.setItem(KEY.TREASURE, t)
   return JSON.parse(t)
 }
-
 function getOffset() {
   const o = localStorage.getItem(KEY.OFFSET)
   if (o) return JSON.parse(o)
@@ -69,7 +64,7 @@ function getOffset() {
   localStorage.setItem(KEY.OFFSET, JSON.stringify(off))
   return off
 }
-function setOffset(off:{ox:number,oy:number}) { localStorage.setItem(KEY.OFFSET, JSON.stringify(off)) }
+function setOffset(off:{ox:number,oy:number}){ localStorage.setItem(KEY.OFFSET, JSON.stringify(off)) }
 
 function loadDigs(){ return JSON.parse(localStorage.getItem(KEY.DIGS) || '{}') }
 function saveDigs(d:any){ localStorage.setItem(KEY.DIGS, JSON.stringify(d)) }
@@ -112,18 +107,12 @@ const api = {
     const k = `${x},${y}`
     const digs = loadDigs()
     if (digs[k]) return { ok:false, reason:'Already dug' }
-
     const allowance = canDigToday()
     if (allowance.freeLeft<=0 && allowance.extraLeft<=0) return { ok:false, reason:'No digs left' }
-
     const today = todayStr()
     digs[k] = { ownerId: user.id, initials: user.initials, ts: Date.now(), day: today }
     saveDigs(digs)
-
-    if (allowance.freeLeft<=0 && allowance.extraLeft>0) {
-      localStorage.setItem(KEY.EXTRA_DIGS, String(allowance.extraLeft-1))
-    }
-
+    if (allowance.freeLeft<=0 && allowance.extraLeft>0) localStorage.setItem(KEY.EXTRA_DIGS, String(allowance.extraLeft-1))
     const found = (x===tx && y===ty)
     if (found) endGame(user.id,x,y)
     return { ok:true, found }
@@ -140,177 +129,123 @@ const api = {
   }
 }
 
-function CyberLights() {
-  const { scene } = useThree()
-  const tex = useTexture('/textures/sky_equirect.jpg') as THREE.Texture
-  useEffect(() => {
-    tex.mapping = THREE.EquirectangularReflectionMapping
-    scene.background = tex
-    return () => { (scene as any).background = null }
-  }, [scene, tex])
-  return (
-    <>
-      <ambientLight intensity={0.45} color={'#2be9ff'} />
-      <pointLight position={[10,20,10]} intensity={1.1} color={'#00fff0'} />
-      <spotLight position={[-20,25,-10]} intensity={0.8} angle={0.4} penumbra={0.3} color={'#ff00f0'} />
-      <hemisphereLight skyColor={'#223'} groundColor={'#111'} intensity={0.4} />
-    </>
-  )
-}
+// --- Street City Scene ---
 
-function WorldSurface({ ox, oy, hovered, digsInView }:{ox:number,oy:number,hovered:{x:number,y:number}|null,digsInView:any[]}){
-  const asphaltMap = useTexture('/textures/asphalt_diffuse.jpg')
-  const asphaltNormal = useTexture('/textures/asphalt_normal.jpg')
-  const pavementMap = useTexture('/textures/pavement_diffuse.jpg')
-  const pavementNormal = useTexture('/textures/pavement_normal.jpg')
-  const facadeMap = useTexture('/textures/building_facade.jpg')
-  const neonLane = useTexture('/textures/neon_lane.png')
+function City({ ox, oy, digsInView }:{ox:number,oy:number,digsInView:any[]}){
+  const asphalt = useTexture('/textures_street/asphalt.jpg')
+  const sidewalk = useTexture('/textures_street/sidewalk.jpg')
+  const facade = useTexture('/textures_street/facade.jpg')
+  const doubleYellow = useTexture('/textures_street/double_yellow.png')
 
-  const roadMesh = useRef<THREE.InstancedMesh>(null!)
-  const paveMesh = useRef<THREE.InstancedMesh>(null!)
-  const neonMeshH = useRef<THREE.InstancedMesh>(null!)
-  const neonMeshV = useRef<THREE.InstancedMesh>(null!)
+  const roadMat = useMemo(()=> new THREE.MeshStandardMaterial({ map: asphalt, roughness:0.95, metalness:0.05 }), [asphalt])
+  const walkMat = useMemo(()=> new THREE.MeshStandardMaterial({ map: sidewalk, roughness:1, metalness:0 }), [sidewalk])
+  const lineMat = useMemo(()=> new THREE.MeshBasicMaterial({ map: doubleYellow, transparent:true, opacity:0.85 }), [doubleYellow])
+  const bldgMat = useMemo(()=> new THREE.MeshStandardMaterial({ map: facade, emissive:new THREE.Color('#181820'), emissiveIntensity:0.25, roughness:0.8 }), [facade])
+  const carMat = useMemo(()=> new THREE.MeshStandardMaterial({ color:'#c62828', roughness:0.5, metalness:0.5, emissive:'#220000', emissiveIntensity:0.1 }), [])
 
-  const buildingMesh = useRef<THREE.InstancedMesh>(null!)
-  const carMesh = useRef<THREE.InstancedMesh>(null!)
+  const plane = useMemo(()=> new THREE.PlaneGeometry(TILE_SIZE, TILE_SIZE), [])
+  const lineGeom = useMemo(()=> new THREE.PlaneGeometry(TILE_SIZE, 0.3), [])
+  const bldgGeom = useMemo(()=> new THREE.BoxGeometry(1.2, 4, 1.2), [])
+  const carGeom = useMemo(()=> new THREE.BoxGeometry(1.2, 0.5, 0.6), [])
 
-  const planeGeom = useMemo(()=>new THREE.PlaneGeometry(TILE_SIZE, TILE_SIZE),[])
-  const neonGeomH = useMemo(()=>new THREE.PlaneGeometry(TILE_SIZE*0.9, 0.08),[])
-  const neonGeomV = useMemo(()=>new THREE.PlaneGeometry(0.08, TILE_SIZE*0.9),[])
-
-  const buildingGeom = useMemo(()=>new THREE.BoxGeometry(0.8, 1, 0.8),[])
-  const carGeom = useMemo(()=>new THREE.BoxGeometry(0.6, 0.2, 0.3),[])
-
-  const roadMat = useMemo(()=> new THREE.MeshStandardMaterial({
-    map: asphaltMap as THREE.Texture, normalMap: asphaltNormal as THREE.Texture,
-    roughness: 0.95, metalness: 0.05, color: new THREE.Color('#cccccc')
-  }), [asphaltMap, asphaltNormal])
-
-  const paveMat = useMemo(()=> new THREE.MeshStandardMaterial({
-    map: pavementMap as THREE.Texture, normalMap: pavementNormal as THREE.Texture,
-    roughness: 1.0, metalness: 0.0, color: new THREE.Color('#d4d4d4')
-  }), [pavementMap, pavementNormal])
-
-  const neonMat = useMemo(()=> new THREE.MeshBasicMaterial({
-    map: neonLane as THREE.Texture, transparent: true, opacity: 0.85
-  }), [neonLane])
-
-  const buildingMat = useMemo(()=> new THREE.MeshStandardMaterial({
-    map: facadeMap as THREE.Texture, emissive: new THREE.Color('#101015'), emissiveIntensity: 0.25,
-    roughness: 0.8, metalness: 0.2
-  }), [facadeMap])
-
-  const carMat = useMemo(()=> new THREE.MeshStandardMaterial({
-    color: new THREE.Color('#00fff0'), emissive: new THREE.Color('#00e5ff'), emissiveIntensity: 0.6,
-    roughness: 0.4, metalness: 0.6
-  }), [])
-
-  const dugMap = useMemo(()=>{
-    const m = new Map<string, any>()
-    digsInView.forEach(d=>m.set(`${d.x},${d.y}`, d))
-    return m
-  },[digsInView])
-
-  const cells = VIEW_W * VIEW_H
-  const maxInstances = cells
+  const roads = useRef<THREE.InstancedMesh>(null!)
+  const walks = useRef<THREE.InstancedMesh>(null!)
+  const linesH = useRef<THREE.InstancedMesh>(null!)
+  const linesV = useRef<THREE.InstancedMesh>(null!)
+  const bldgs = useRef<THREE.InstancedMesh>(null!)
+  const cars = useRef<THREE.InstancedMesh>(null!)
 
   useEffect(()=>{
-    if (roadMesh.current) roadMesh.current.count = maxInstances
-    if (paveMesh.current) paveMesh.current.count = maxInstances
-    if (neonMeshH.current) neonMeshH.current.count = maxInstances
-    if (neonMeshV.current) neonMeshV.current.count = maxInstances
-    if (buildingMesh.current) buildingMesh.current.count = maxInstances
-    if (carMesh.current) carMesh.current.count = maxInstances
-  }, [maxInstances])
+    const cells = VIEW_W*VIEW_H
+    ;[roads,walks,linesH,linesV,bldgs,cars].forEach(r=>{ if(r.current) r.current.count = cells })
+  },[])
 
   useEffect(()=>{
-    if (!roadMesh.current || !paveMesh.current || !neonMeshH.current || !neonMeshV.current || !buildingMesh.current || !carMesh.current) return
+    if (!roads.current || !walks.current || !linesH.current || !linesV.current || !bldgs.current || !cars.current) return
     const dummy = new THREE.Object3D()
-
-    let ri=0, pi=0, nhi=0, nvi=0, bi=0, ci=0
+    let ri=0, wi=0, lhi=0, lvi=0, bi=0, ci=0
 
     for (let yy=0; yy<VIEW_H; yy++){
       for (let xx=0; xx<VIEW_W; xx++){
         const wx = ox + xx, wy = oy + yy
-        const cx = (xx - VIEW_W/2)
-        const cz = (yy - VIEW_H/2)
+        const x = (xx - VIEW_W/2)
+        const z = (yy - VIEW_H/2)
 
-        const isRoad = (wx % 10 === 0) || (wy % 10 === 0)
+        const roadRow = (wy % 12 === 0)
+        const roadCol = (wx % 12 === 0)
+        const isRoad = roadRow || roadCol
 
         if (isRoad){
-          dummy.position.set(cx, 0, cz)
-          dummy.rotation.set(-Math.PI/2, 0, 0)
-          dummy.scale.set(1,1,1)
+          dummy.position.set(x, 0, z)
+          dummy.rotation.set(-Math.PI/2,0,0)
           dummy.updateMatrix()
-          roadMesh.current.setMatrixAt(ri++, dummy.matrix)
+          roads.current.setMatrixAt(ri++, dummy.matrix)
 
-          if (wy % 10 === 0){
-            dummy.position.set(cx, 0.002, cz)
-            dummy.rotation.set(-Math.PI/2, 0, 0)
+          // center lines on roads (horizontal & vertical)
+          if (roadRow){
+            dummy.position.set(x, 0.002, z)
             dummy.updateMatrix()
-            neonMeshH.current.setMatrixAt(nhi++, dummy.matrix)
+            linesH.current.setMatrixAt(lhi++, dummy.matrix)
           }
-          if (wx % 10 === 0){
-            dummy.position.set(cx, 0.002, cz)
-            dummy.rotation.set(-Math.PI/2, 0, 0)
+          if (roadCol){
+            dummy.position.set(x, 0.002, z)
+            dummy.rotation.set(-Math.PI/2, Math.PI/2, 0)
             dummy.updateMatrix()
-            neonMeshV.current.setMatrixAt(nvi++, dummy.matrix)
+            linesV.current.setMatrixAt(lvi++, dummy.matrix)
+            dummy.rotation.set(-Math.PI/2, 0, 0)
           }
 
-          if ((wx % 20 === 0) && (wy % 20 === 5)){
-            const orient = (wx % 20 === 0) ? 0 : Math.PI/2
-            const jitter = (seeded(wx,wy)-0.5)*0.2
-            dummy.position.set(cx + jitter, 0.12, cz + jitter)
-            dummy.rotation.set(0, orient, 0)
-            const len = 0.6 + seeded(wx+3,wy+7)*0.3
-            dummy.scale.set(len, 0.2, 0.3)
+          // parked car occasionally near curb
+          if ((wx % 24 === 6) && (wy % 24 === 12)){
+            dummy.position.set(x + 0.8, 0.3, z)
+            dummy.rotation.set(0, Math.PI/2, 0)
+            dummy.scale.set(1.2,0.5,0.6)
             dummy.updateMatrix()
-            carMesh.current.setMatrixAt(ci++, dummy.matrix)
+            cars.current.setMatrixAt(ci++, dummy.matrix)
           }
 
         } else {
-          dummy.position.set(cx, 0, cz)
-          dummy.rotation.set(-Math.PI/2, 0, 0)
-          dummy.scale.set(1,1,1)
+          // sidewalk
+          dummy.position.set(x, 0, z)
+          dummy.rotation.set(-Math.PI/2,0,0)
           dummy.updateMatrix()
-          paveMesh.current.setMatrixAt(pi++, dummy.matrix)
+          walks.current.setMatrixAt(wi++, dummy.matrix)
 
-          if ((wx % 20 === 5) && (wy % 20 === 5)){
-            const h = 0.8 + seeded(wx,wy) * 4.0
-            dummy.position.set(cx, h/2, cz)
-            dummy.rotation.set(0, (seeded(wx+11, wy+19))*Math.PI*2, 0)
-            dummy.scale.set(0.8, h, 0.8)
+          // buildings along block edges (a few rows off roads)
+          const nearRow = (wy % 12 === 2)
+          const nearCol = (wx % 12 === 2)
+          if ((nearRow && !roadCol) || (nearCol && !roadRow)){
+            const h = 3 + seeded(wx, wy)*8
+            dummy.position.set(x, h/2, z)
+            dummy.rotation.set(0, (seeded(wx+2,wy+5))*Math.PI*2, 0)
+            dummy.scale.set(1.2, h, 1.2)
             dummy.updateMatrix()
-            buildingMesh.current.setMatrixAt(bi++, dummy.matrix)
+            bldgs.current.setMatrixAt(bi++, dummy.matrix)
           }
         }
       }
     }
 
-    roadMesh.current.count = ri
-    paveMesh.current.count = pi
-    neonMeshH.current.count = nhi
-    neonMeshV.current.count = nvi
-    buildingMesh.current.count = bi
-    carMesh.current.count = ci
+    roads.current.count = ri
+    walks.current.count = wi
+    linesH.current.count = lhi
+    linesV.current.count = lvi
+    bldgs.current.count = bi
+    cars.current.count = ci
 
-    roadMesh.current.instanceMatrix.needsUpdate = true
-    paveMesh.current.instanceMatrix.needsUpdate = true
-    neonMeshH.current.instanceMatrix.needsUpdate = true
-    neonMeshV.current.instanceMatrix.needsUpdate = true
-    buildingMesh.current.instanceMatrix.needsUpdate = true
-    carMesh.current.instanceMatrix.needsUpdate = true
-
-  },[ox,oy,dugMap])
+    ;[roads,walks,linesH,linesV,bldgs,cars].forEach(r=>{
+      r.current.instanceMatrix.needsUpdate = true
+    })
+  },[ox,oy])
 
   return (
     <group>
-      <instancedMesh ref={paveMesh} args={[planeGeom, paveMat, maxInstances]} />
-      <instancedMesh ref={roadMesh} args={[planeGeom, roadMat, maxInstances]} />
-      <instancedMesh ref={neonMeshH} args={[neonGeomH, neonMat, maxInstances]} />
-      <instancedMesh ref={neonMeshV} args={[neonGeomV, neonMat, maxInstances]} />
-      <instancedMesh ref={buildingMesh} args={[buildingGeom, buildingMat, maxInstances]} />
-      <instancedMesh ref={carMesh} args={[carGeom, carMat, maxInstances]} />
+      <instancedMesh ref={walks} args={[plane, walkMat, VIEW_W*VIEW_H]} castShadow receiveShadow />
+      <instancedMesh ref={roads} args={[plane, roadMat, VIEW_W*VIEW_H]} castShadow receiveShadow />
+      <instancedMesh ref={linesH} args={[lineGeom, lineMat, VIEW_W*VIEW_H]} />
+      <instancedMesh ref={linesV} args={[lineGeom, lineMat, VIEW_W*VIEW_H]} />
+      <instancedMesh ref={bldgs} args={[bldgGeom, bldgMat, VIEW_W*VIEW_H]} castShadow receiveShadow />
+      <instancedMesh ref={cars} args={[carGeom, carMat, VIEW_W*VIEW_H]} castShadow receiveShadow />
       {digsInView.map(d => (
         <Html key={`${d.x},${d.y}`} center transform distanceFactor={15}
           position={[(d.x - ox - VIEW_W/2), 0.05, (d.y - oy - VIEW_H/2)]}>
@@ -322,20 +257,50 @@ function WorldSurface({ ox, oy, hovered, digsInView }:{ox:number,oy:number,hover
   )
 }
 
-function HoverPicker({ ox, oy, setHovered }:{ox:number,oy:number,setHovered:(v:any)=>void}){
-  const { camera } = useThree()
+// --- Controls: pointer lock + WASD movement ---
+function StreetControls({ setHovered, ox, oy }:{ setHovered:(v:any)=>void, ox:number, oy:number }){
+  const { camera, gl } = useThree()
+  const velocity = useRef(new THREE.Vector3())
+  const dir = useRef(new THREE.Vector3())
+  const keys = useRef<{[k:string]:boolean}>({})
   const raycaster = useMemo(()=>new THREE.Raycaster(),[])
   const plane = useMemo(()=>new THREE.Plane(new THREE.Vector3(0,1,0), 0),[])
-  const mouse = useRef(new THREE.Vector2())
 
   useEffect(()=>{
-    const dom = (document.querySelector('canvas') as HTMLCanvasElement)
-    if (!dom) return
-    const onMove = (e:MouseEvent)=>{
-      const rect = dom.getBoundingClientRect()
-      mouse.current.x = ((e.clientX - rect.left)/rect.width)*2 - 1
-      mouse.current.y = -((e.clientY - rect.top)/rect.height)*2 + 1
-      raycaster.setFromCamera(mouse.current, camera)
+    camera.position.set(0, 1.7, 6)
+    camera.lookAt(0,1.6,0)
+    gl.shadowMap.enabled = true
+    gl.toneMapping = THREE.ACESFilmicToneMapping
+    gl.toneMappingExposure = 1.0
+  }, [camera, gl])
+
+  useEffect(()=>{
+    const down = (e:KeyboardEvent)=>{ keys.current[e.key.toLowerCase()] = true }
+    const up = (e:KeyboardEvent)=>{ keys.current[e.key.toLowerCase()] = false }
+    window.addEventListener('keydown', down)
+    window.addEventListener('keyup', up)
+    return ()=>{ window.removeEventListener('keydown', down); window.removeEventListener('keyup', up) }
+  }, [])
+
+  // simple loop
+  useThree(({ clock })=>{
+    const dt = Math.min(0.05, clock.getDelta())
+    dir.current.set(0,0,0)
+    if (keys.current['w']) dir.current.z -= 1
+    if (keys.current['s']) dir.current.z += 1
+    if (keys.current['a']) dir.current.x -= 1
+    if (keys.current['d']) dir.current.x += 1
+    dir.current.normalize()
+    const speed = 6
+    velocity.current.copy(dir.current).applyQuaternion(camera.quaternion).multiplyScalar(speed*dt)
+    camera.position.add( new THREE.Vector3(velocity.current.x, 0, velocity.current.z) )
+  })
+
+  // update hovered from crosshair center
+  useEffect(()=>{
+    const onMove = ()=>{
+      // cast from camera forward
+      raycaster.setFromCamera(new THREE.Vector2(0,0), camera as any)
       const p = new THREE.Vector3()
       raycaster.ray.intersectPlane(plane, p)
       const gx = Math.round(p.x + VIEW_W/2)
@@ -345,20 +310,11 @@ function HoverPicker({ ox, oy, setHovered }:{ox:number,oy:number,setHovered:(v:a
       if (gx>=0 && gx<VIEW_W && gy>=0 && gy<VIEW_H) setHovered({ x: wx, y: wy })
       else setHovered(null)
     }
-    dom.addEventListener('mousemove', onMove)
-    return ()=>dom.removeEventListener('mousemove', onMove)
-  },[camera, plane, ox, oy, setHovered])
+    const id = setInterval(onMove, 50)
+    return ()=>clearInterval(id)
+  }, [camera, ox, oy, setHovered, raycaster, plane])
 
-  return null
-}
-
-function CameraRig(){
-  const { camera } = useThree()
-  useEffect(()=>{
-    camera.position.set(0,18,18)
-    camera.lookAt(0,0,0)
-  },[camera])
-  return null
+  return <PointerLockControls selector="#street-enter" />
 }
 
 export default function App(){
@@ -370,71 +326,31 @@ export default function App(){
   const [extraLeft, setExtraLeft] = useState(0)
   const ended = gameEnded()
 
+  useEffect(()=>{ setUser(getOrCreateUser()); const a=canDigToday(); setFreeLeft(a.freeLeft); setExtraLeft(a.extraLeft) },[])
   useEffect(()=>{
-    setUser(getOrCreateUser())
-    const a = canDigToday()
-    setFreeLeft(a.freeLeft)
-    setExtraLeft(a.extraLeft)
-  },[])
-
-  useEffect(()=>{
-    let mounted = true
+    let mounted=true
     api.fetchWindow(ox,oy,VIEW_W,VIEW_H).then(res=>mounted && setDigs(res))
-    setOffset({ox,oy})
-    return ()=>{ mounted = false }
-  },[ox,oy])
-
-  useEffect(()=>{
-    const onKey = (e:KeyboardEvent)=>{
-      if (['INPUT','TEXTAREA'].includes((document.activeElement as any)?.tagName)) return
-      let nx = ox, ny = oy
-      const step = 25
-      if (e.key==='w' || e.key==='ArrowUp') ny -= step
-      if (e.key==='s' || e.key==='ArrowDown') ny += step
-      if (e.key==='a' || e.key==='ArrowLeft') nx -= step
-      if (e.key==='d' || e.key==='ArrowRight') nx += step
-      nx = clamp(nx, 0, WORLD_W - VIEW_W)
-      ny = clamp(ny, 0, WORLD_H - VIEW_H)
-      if (nx!==ox || ny!==oy) setOff({ ox:nx, oy:ny })
-    }
-    window.addEventListener('keydown', onKey)
-    return ()=>window.removeEventListener('keydown', onKey)
+    setOffset({ox,oy}); return ()=>{ mounted=false }
   },[ox,oy])
 
   const handleDig = async()=>{
     if (!hovered) return
-    const { x, y } = hovered
-    const res = await api.dig(x,y)
+    const res = await api.dig(hovered.x, hovered.y)
     if (!res.ok){ alert(res.reason); return }
-    if (res.found){ alert('🎉 YOU FOUND THE TREASURE! The game is over.') }
-    const a = canDigToday()
-    setFreeLeft(a.freeLeft)
-    setExtraLeft(a.extraLeft)
-    const win = await api.fetchWindow(ox,oy,VIEW_W,VIEW_H)
-    setDigs(win)
-  }
-
-  const buyMore = async()=>{
-    const count = Number(prompt('How many extra digs?', '5') || 0)
-    if (!count) return
-    const res = await api.buyDigs(count)
-    if (res.ok) { setExtraLeft(res.newBalance); alert(`Purchased ${count} extra digs.`) }
+    if (res.found) alert('🎉 YOU FOUND THE TREASURE! The game is over.')
+    const a = canDigToday(); setFreeLeft(a.freeLeft); setExtraLeft(a.extraLeft)
+    const win = await api.fetchWindow(ox,oy,VIEW_W,VIEW_H); setDigs(win)
   }
 
   return (
-    <div className="min-h-screen w-full" style={{ background: '#05080d', color: 'white' }}>
-      <header className="flex items-center justify-between p-4 md:p-6 border-b border-cyan-500/20 sticky top-0 z-20" style={{ background: '#05080dCC', backdropFilter:'blur(6px)' }}>
-        <h1 className="text-xl md:text-2xl font-extrabold tracking-tight">
-          CYBER HUNT<span className="text-cyan-400">.</span>
-        </h1>
-        <div className="flex items-center gap-2 text-xs md:text-sm">
-          <span className="px-2 py-1 rounded-full bg-cyan-500/10 text-cyan-300">World: {WORLD_W.toLocaleString()} × {WORLD_H.toLocaleString()} ft</span>
-          <span className="px-2 py-1 rounded-full bg-fuchsia-500/10 text-fuchsia-300">Viewport: {VIEW_W} × {VIEW_H}</span>
-        </div>
+    <div className="min-h-screen w-full" style={{ background: '#0b0f14', color: 'white' }}>
+      <header className="flex items-center justify-between p-4 md:p-6 border-b border-cyan-500/20 sticky top-0 z-20" style={{ background: '#0b0f14CC', backdropFilter:'blur(6px)' }}>
+        <h1 className="text-xl md:text-2xl font-extrabold tracking-tight">CYBER HUNT<span className="text-cyan-400">.</span></h1>
+        <button id="street-enter" className="rounded px-3 py-2 bg-cyan-600 hover:bg-cyan-500">Click to enter Street View</button>
       </header>
 
       <main className="grid md:grid-cols-[320px_1fr] gap-4 md:gap-6 p-4 md:p-6">
-        <div className="bg-[#070b12] border border-cyan-500/20 rounded-2xl p-4 md:p-6">
+        <div className="bg-[#0e141c] border border-cyan-500/20 rounded-2xl p-4 md:p-6">
           <div className="space-y-4">
             <div>
               <div className="text-sm text-white/60">Player</div>
@@ -450,90 +366,31 @@ export default function App(){
                 <div className="text-xs text-white/60">Extra digs</div>
               </div>
             </div>
-            <div className="space-y-2 text-sm">
-              <div className="text-white/80">Controls</div>
-              <ul className="list-disc list-inside text-white/60">
-                <li>W/A/S/D or Arrow Keys to scroll the world</li>
-                <li>Hover a cell to target, click DIG to excavate</li>
-                <li>One free square-foot per day; buy more if needed</li>
-              </ul>
-            </div>
+            <div className="text-sm text-white/70">Controls: Click the button above to lock the mouse. Use <b>W/A/S/D</b> to walk; click <b>Dig</b> to excavate the tile under the crosshair.</div>
             <div className="flex gap-2">
               <button onClick={handleDig} className="bg-cyan-600 hover:bg-cyan-500 w-full rounded-lg px-3 py-2 font-semibold">DIG</button>
-              <button onClick={buyMore} className="bg-white/10 hover:bg-white/20 w-full rounded-lg px-3 py-2 font-semibold">Buy Digs</button>
             </div>
             <div className="text-xs text-white/40 pt-2">
-              {ended ? (
-                <div className="text-fuchsia-300">Game ended. Treasure found at ({ended.x}, {ended.y}).</div>
-              ) : (
-                <div>Find the hidden cache. First to hit the exact square wins. 🏴‍☠️</div>
-              )}
-            </div>
-            <div className="pt-2 border-t border-white/10 text-xs text-white/40">
-              <div className="mb-1 font-semibold text-white/60">Admin (demo)</div>
-              <div className="flex gap-2">
-                <button className="h-8 px-3 rounded border border-white/20" onClick={async()=>{ await api.resetAll(); location.reload() }}>Reset World</button>
-                <button className="h-8 px-3 rounded border border-white/20" onClick={()=>{
-                  const t = getTreasure()
-                  alert(`Treasure seed (demo only): ${t.seed}\nHidden at: (${t.x}, ${t.y})`)
-                }}>Reveal Treasure (demo)</button>
-              </div>
-              <div className="mt-2">Replace mock API with server endpoints before launch.</div>
+              {ended ? <div className="text-fuchsia-300">Game ended. Treasure found at ({ended.x}, {ended.y}).</div> : <div>Find the hidden cache. First to hit the exact square wins. 🏴‍☠️</div>}
             </div>
           </div>
         </div>
 
         <div className="relative rounded-2xl overflow-hidden border border-cyan-500/20" style={{ height: '70vh' }}>
-          <Canvas dpr={[1,2]} camera={{ fov: 40 }}>
-            <CameraRig />
-            <CyberLights />
-            <OrbitControls enablePan={false} enableZoom={true} minDistance={10} maxDistance={45} />
-            <HoverPicker ox={ox} oy={oy} setHovered={setHovered} />
-            <WorldView ox={ox} oy={oy} hovered={hovered} digs={digs} />
+          <Canvas shadows camera={{ fov: 60 }}>
+            <directionalLight position={[20, 30, 10]} intensity={1.2} castShadow shadow-mapSize-width={2048} shadow-mapSize-height={2048} />
+            <hemisphereLight skyColor={'#88a'} groundColor={'#223'} intensity={0.5} />
+
+            <StreetControls setHovered={setHovered} ox={ox} oy={oy} />
+            <City ox={ox} oy={oy} digsInView={digs} />
+
+            {/* crosshair */}
+            <Html center>
+              <div style={{ width: 12, height: 12, borderRadius: 9999, border: '2px solid rgba(255,255,255,0.8)' }}></div>
+            </Html>
           </Canvas>
-
-          <div className="absolute top-2 left-2 text-xs md:text-sm bg-black/40 backdrop-blur px-2 py-1 rounded">
-            <div>Offset: <span className="text-cyan-300">({ox}, {oy})</span></div>
-            <div>Hover: <span className="text-fuchsia-300">{hovered ? `(${hovered.x}, ${hovered.y})` : '—'}</span></div>
-          </div>
-
-          <div className="absolute bottom-3 right-3 grid grid-cols-3 gap-1 text-xs select-none">
-            {['▲','◀','▶','▼'].map((txt,i)=>{
-              const onClick = ()=>{
-                const step = 25
-                let nx = ox, ny = oy
-                if (txt==='▲') ny -= step
-                if (txt==='▼') ny += step
-                if (txt==='◀') nx -= step
-                if (txt==='▶') nx += step
-                nx = clamp(nx, 0, WORLD_W - VIEW_W)
-                ny = clamp(ny, 0, WORLD_H - VIEW_H)
-                setOff({ ox:nx, oy:ny })
-              }
-              return <button key={i} onClick={onClick} className="bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 rounded px-3 py-2">{txt}</button>
-            })}
-          </div>
         </div>
       </main>
-
-      <footer className="p-4 md:p-6 text-center text-xs text-white/40">
-        Built with @react-three/fiber • Textured city surface • Prototype payment. Replace before launch.
-      </footer>
     </div>
   )
-}
-
-function WorldView({ ox, oy, hovered, digs }:{ox:number,oy:number,hovered:{x:number,y:number}|null,digs:any[]}){
-  const [digsInView, setDigsInView] = useState<any[]>([])
-
-  useEffect(()=>{
-    let mounted = true
-    ;(async()=>{
-      const res = await api.fetchWindow(ox,oy,VIEW_W,VIEW_H)
-      if (mounted) setDigsInView(res)
-    })()
-    return ()=>{ mounted = false }
-  },[ox,oy,digs])
-
-  return <WorldSurface ox={ox} oy={oy} hovered={hovered} digsInView={digsInView} />
 }
