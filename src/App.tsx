@@ -4,21 +4,10 @@ import { Canvas, useThree } from '@react-three/fiber'
 import { Html, PointerLockControls, useTexture } from '@react-three/drei'
 import * as THREE from 'three'
 
-/**
- * Cyber Hunt — Street Pack (static city, street-level)
- * - First-person street view with WASD (press click to lock pointer)
- * - Sunlight + shadows + ACES tone mapping
- * - Road with double yellow center + sidewalks
- * - Rows of textured buildings + parked cars
- * - Click to DIG a 1x1 tile under the crosshair
- * - Treasure/dig logic preserved
- */
-
 const WORLD_W = 3163
 const WORLD_H = 3162
-const VIEW_W = 120   // smaller viewport at street level for perf
-const VIEW_H = 120
-const TILE_SIZE = 1
+const VIEW_W = 160
+const VIEW_H = 160
 const DAILY_FREE_DIGS = 1
 
 const KEY = {
@@ -70,7 +59,6 @@ function loadDigs(){ return JSON.parse(localStorage.getItem(KEY.DIGS) || '{}') }
 function saveDigs(d:any){ localStorage.setItem(KEY.DIGS, JSON.stringify(d)) }
 function gameEnded(){ const e = localStorage.getItem(KEY.ENDED); return e?JSON.parse(e):null }
 function endGame(winnerId:string,x:number,y:number){ localStorage.setItem(KEY.ENDED, JSON.stringify({ winnerId, x, y, ts: Date.now() })) }
-
 function canDigToday(){
   const last = localStorage.getItem(KEY.LAST_DIG_DAY)
   const extra = Number(localStorage.getItem(KEY.EXTRA_DIGS) || 0)
@@ -129,126 +117,168 @@ const api = {
   }
 }
 
-// --- Street City Scene ---
+// ---------- Street Scene ----------
 
-function City({ ox, oy, digsInView }:{ox:number,oy:number,digsInView:any[]}){
-  const asphalt = useTexture('/textures_street/asphalt.jpg')
-  const sidewalk = useTexture('/textures_street/sidewalk.jpg')
-  const facade = useTexture('/textures_street/facade.jpg')
-  const doubleYellow = useTexture('/textures_street/double_yellow.png')
+function Street({ ox, oy, digsInView }:{ox:number,oy:number,digsInView:any[]}){
+  const asphalt = useTexture('/textures_street_v2/asphalt.jpg')
+  const sidewalk = useTexture('/textures_street_v2/sidewalk.jpg')
+  const curb = useTexture('/textures_street_v2/curb.jpg')
+  const facade = useTexture('/textures_street_v2/facade.jpg')
+  const lanes = useTexture('/textures_street_v2/lanes.png')
+  const sky = useTexture('/textures_street_v2/sky.jpg')
 
-  const roadMat = useMemo(()=> new THREE.MeshStandardMaterial({ map: asphalt, roughness:0.95, metalness:0.05 }), [asphalt])
+  const { scene, gl } = useThree()
+  useEffect(()=>{
+    const tex = sky as THREE.Texture
+    tex.mapping = THREE.EquirectangularReflectionMapping
+    scene.background = tex
+    gl.toneMapping = THREE.ACESFilmicToneMapping
+    gl.toneMappingExposure = 1.0
+    gl.shadowMap.enabled = true
+  },[scene, gl, sky])
+
+  ;[asphalt, sidewalk, facade].forEach(t=>{ t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(6,6); (t as any).anisotropy = 8 })
+
+  const plane = useMemo(()=> new THREE.PlaneGeometry(1,1), [])
+  const longPlane = useMemo(()=> new THREE.PlaneGeometry(1,0.2), [])
+  const curbGeom = useMemo(()=> new THREE.BoxGeometry(1,0.15,0.3), [])
+  const bldgGeom = useMemo(()=> new THREE.BoxGeometry(1.5, 6, 1.2), [])
+  const palmTrunk = useMemo(()=> new THREE.CylinderGeometry(0.06, 0.09, 3, 8), [])
+  const palmLeaf = useMemo(()=> new THREE.BoxGeometry(0.05, 0.6, 0.2), [])
+
+  const roadMat = useMemo(()=> new THREE.MeshStandardMaterial({ map: asphalt, roughness:0.95, metalness:0.02 }), [asphalt])
   const walkMat = useMemo(()=> new THREE.MeshStandardMaterial({ map: sidewalk, roughness:1, metalness:0 }), [sidewalk])
-  const lineMat = useMemo(()=> new THREE.MeshBasicMaterial({ map: doubleYellow, transparent:true, opacity:0.85 }), [doubleYellow])
-  const bldgMat = useMemo(()=> new THREE.MeshStandardMaterial({ map: facade, emissive:new THREE.Color('#181820'), emissiveIntensity:0.25, roughness:0.8 }), [facade])
-  const carMat = useMemo(()=> new THREE.MeshStandardMaterial({ color:'#c62828', roughness:0.5, metalness:0.5, emissive:'#220000', emissiveIntensity:0.1 }), [])
-
-  const plane = useMemo(()=> new THREE.PlaneGeometry(TILE_SIZE, TILE_SIZE), [])
-  const lineGeom = useMemo(()=> new THREE.PlaneGeometry(TILE_SIZE, 0.3), [])
-  const bldgGeom = useMemo(()=> new THREE.BoxGeometry(1.2, 4, 1.2), [])
-  const carGeom = useMemo(()=> new THREE.BoxGeometry(1.2, 0.5, 0.6), [])
+  const curbMat = useMemo(()=> new THREE.MeshStandardMaterial({ map: curb, roughness:1, metalness:0 }), [curb])
+  const lineMat = useMemo(()=> new THREE.MeshBasicMaterial({ map: lanes, transparent:true, opacity:0.95 }), [lanes])
+  const bldgMat = useMemo(()=> new THREE.MeshStandardMaterial({ map: facade, roughness:0.7, metalness:0.1, emissive:'#171821', emissiveIntensity:0.25 }), [facade])
+  const palmMat = useMemo(()=> new THREE.MeshStandardMaterial({ color:'#3a2d1f' }), [])
+  const leafMat = useMemo(()=> new THREE.MeshStandardMaterial({ color:'#1faa59' }), [])
 
   const roads = useRef<THREE.InstancedMesh>(null!)
-  const walks = useRef<THREE.InstancedMesh>(null!)
-  const linesH = useRef<THREE.InstancedMesh>(null!)
-  const linesV = useRef<THREE.InstancedMesh>(null!)
-  const bldgs = useRef<THREE.InstancedMesh>(null!)
-  const cars = useRef<THREE.InstancedMesh>(null!)
+  const walksL = useRef<THREE.InstancedMesh>(null!)
+  const walksR = useRef<THREE.InstancedMesh>(null!)
+  const lines = useRef<THREE.InstancedMesh>(null!)
+  const curbsL = useRef<THREE.InstancedMesh>(null!)
+  const curbsR = useRef<THREE.InstancedMesh>(null!)
+  const bldgsL = useRef<THREE.InstancedMesh>(null!)
+  const bldgsR = useRef<THREE.InstancedMesh>(null!)
+  const palmsL = useRef<THREE.InstancedMesh>(null!)
+  const palmsR = useRef<THREE.InstancedMesh>(null!)
+  const leavesL = useRef<THREE.InstancedMesh>(null!)
+  const leavesR = useRef<THREE.InstancedMesh>(null!)
 
+  const cells = VIEW_W*VIEW_H
   useEffect(()=>{
-    const cells = VIEW_W*VIEW_H
-    ;[roads,walks,linesH,linesV,bldgs,cars].forEach(r=>{ if(r.current) r.current.count = cells })
+    ;[roads,walksL,walksR,lines,curbsL,curbsR,bldgsL,bldgsR,palmsL,palmsR,leavesL,leavesR].forEach(m=>{ if(m.current) m.current.count = cells })
   },[])
 
   useEffect(()=>{
-    if (!roads.current || !walks.current || !linesH.current || !linesV.current || !bldgs.current || !cars.current) return
     const dummy = new THREE.Object3D()
-    let ri=0, wi=0, lhi=0, lvi=0, bi=0, ci=0
+    let ri=0, wl=0, wr=0, li=0, cl=0, cr=0, bl=0, br=0, pl=0, pr=0, ll=0, lr=0
 
+    // We render a single long street along Z, centered X=0, with sidewalks at X=±2.5, buildings at ±4.2
     for (let yy=0; yy<VIEW_H; yy++){
       for (let xx=0; xx<VIEW_W; xx++){
-        const wx = ox + xx, wy = oy + yy
-        const x = (xx - VIEW_W/2)
         const z = (yy - VIEW_H/2)
+        const x = 0 // road center
+        // road tile
+        dummy.position.set(x, 0, z)
+        dummy.rotation.set(-Math.PI/2,0,0); dummy.scale.set(6,1,1)
+        dummy.updateMatrix()
+        roads.current.setMatrixAt(ri++, dummy.matrix)
 
-        const roadRow = (wy % 12 === 0)
-        const roadCol = (wx % 12 === 0)
-        const isRoad = roadRow || roadCol
+        // lane markings
+        dummy.position.set(x, 0.002, z)
+        dummy.rotation.set(-Math.PI/2,0,0); dummy.scale.set(6,1,1)
+        dummy.updateMatrix()
+        lines.current.setMatrixAt(li++, dummy.matrix)
 
-        if (isRoad){
-          dummy.position.set(x, 0, z)
-          dummy.rotation.set(-Math.PI/2,0,0)
-          dummy.updateMatrix()
-          roads.current.setMatrixAt(ri++, dummy.matrix)
+        // sidewalks L/R
+        dummy.rotation.set(-Math.PI/2,0,0); dummy.scale.set(2,1,1)
+        dummy.position.set(-4, 0.001, z)
+        dummy.updateMatrix(); walksL.current.setMatrixAt(wl++, dummy.matrix)
+        dummy.position.set( 4, 0.001, z)
+        dummy.updateMatrix(); walksR.current.setMatrixAt(wr++, dummy.matrix)
 
-          // center lines on roads (horizontal & vertical)
-          if (roadRow){
-            dummy.position.set(x, 0.002, z)
-            dummy.updateMatrix()
-            linesH.current.setMatrixAt(lhi++, dummy.matrix)
+        // curbs
+        dummy.rotation.set(0,0,0); dummy.scale.set(2,1,1)
+        dummy.position.set(-3, 0.075, z)
+        dummy.updateMatrix(); curbsL.current.setMatrixAt(cl++, dummy.matrix)
+        dummy.position.set( 3, 0.075, z)
+        dummy.updateMatrix(); curbsR.current.setMatrixAt(cr++, dummy.matrix)
+
+        // buildings every ~6 units
+        if (yy % 6 === 0){
+          const hL = 5 + seeded(xx,yy)*8
+          dummy.position.set(-5.5, hL/2, z)
+          dummy.rotation.set(0, seeded(xx+7,yy+3)*Math.PI*2, 0)
+          dummy.scale.set(1.5, hL, 1.2)
+          dummy.updateMatrix(); bldgsL.current.setMatrixAt(bl++, dummy.matrix)
+
+          const hR = 5 + seeded(xx+13,yy+11)*8
+          dummy.position.set(5.5, hR/2, z)
+          dummy.rotation.set(0, seeded(xx+17,yy+5)*Math.PI*2, 0)
+          dummy.scale.set(1.5, hR, 1.2)
+          dummy.updateMatrix(); bldgsR.current.setMatrixAt(br++, dummy.matrix)
+        }
+
+        // palms every ~12 units
+        if (yy % 12 === 0){
+          // left
+          dummy.position.set(-4.8, 1.5, z)
+          dummy.rotation.set(0,0,0)
+          dummy.scale.set(1,1,1)
+          dummy.updateMatrix(); palmsL.current.setMatrixAt(pl++, dummy.matrix)
+          for (let k=0;k<6;k++){
+            const leaf = new THREE.Object3D()
+            leaf.position.set(-4.8, 3.0, z)
+            leaf.rotation.set(Math.PI/2.8, (k/6)*Math.PI*2, 0)
+            leaf.scale.set(1,1,1)
+            leaf.updateMatrix(); leavesL.current.setMatrixAt(ll++, leaf.matrix)
           }
-          if (roadCol){
-            dummy.position.set(x, 0.002, z)
-            dummy.rotation.set(-Math.PI/2, Math.PI/2, 0)
-            dummy.updateMatrix()
-            linesV.current.setMatrixAt(lvi++, dummy.matrix)
-            dummy.rotation.set(-Math.PI/2, 0, 0)
-          }
-
-          // parked car occasionally near curb
-          if ((wx % 24 === 6) && (wy % 24 === 12)){
-            dummy.position.set(x + 0.8, 0.3, z)
-            dummy.rotation.set(0, Math.PI/2, 0)
-            dummy.scale.set(1.2,0.5,0.6)
-            dummy.updateMatrix()
-            cars.current.setMatrixAt(ci++, dummy.matrix)
-          }
-
-        } else {
-          // sidewalk
-          dummy.position.set(x, 0, z)
-          dummy.rotation.set(-Math.PI/2,0,0)
-          dummy.updateMatrix()
-          walks.current.setMatrixAt(wi++, dummy.matrix)
-
-          // buildings along block edges (a few rows off roads)
-          const nearRow = (wy % 12 === 2)
-          const nearCol = (wx % 12 === 2)
-          if ((nearRow && !roadCol) || (nearCol && !roadRow)){
-            const h = 3 + seeded(wx, wy)*8
-            dummy.position.set(x, h/2, z)
-            dummy.rotation.set(0, (seeded(wx+2,wy+5))*Math.PI*2, 0)
-            dummy.scale.set(1.2, h, 1.2)
-            dummy.updateMatrix()
-            bldgs.current.setMatrixAt(bi++, dummy.matrix)
+          // right
+          dummy.position.set(4.8, 1.5, z); dummy.updateMatrix(); palmsR.current.setMatrixAt(pr++, dummy.matrix)
+          for (let k=0;k<6;k++){
+            const leaf = new THREE.Object3D()
+            leaf.position.set(4.8, 3.0, z)
+            leaf.rotation.set(Math.PI/2.8, (k/6)*Math.PI*2, 0)
+            leaf.scale.set(1,1,1)
+            leaf.updateMatrix(); leavesR.current.setMatrixAt(lr++, leaf.matrix)
           }
         }
       }
     }
 
     roads.current.count = ri
-    walks.current.count = wi
-    linesH.current.count = lhi
-    linesV.current.count = lvi
-    bldgs.current.count = bi
-    cars.current.count = ci
+    walksL.current.count = wl; walksR.current.count = wr
+    lines.current.count = li
+    curbsL.current.count = cl; curbsR.current.count = cr
+    bldgsL.current.count = bl; bldgsR.current.count = br
+    palmsL.current.count = pl; palmsR.current.count = pr
+    leavesL.current.count = ll; leavesR.current.count = lr
 
-    ;[roads,walks,linesH,linesV,bldgs,cars].forEach(r=>{
+    ;[roads,walksL,walksR,lines,curbsL,curbsR,bldgsL,bldgsR,palmsL,palmsR,leavesL,leavesR].forEach(r=>{
       r.current.instanceMatrix.needsUpdate = true
     })
   },[ox,oy])
 
   return (
     <group>
-      <instancedMesh ref={walks} args={[plane, walkMat, VIEW_W*VIEW_H]} castShadow receiveShadow />
-      <instancedMesh ref={roads} args={[plane, roadMat, VIEW_W*VIEW_H]} castShadow receiveShadow />
-      <instancedMesh ref={linesH} args={[lineGeom, lineMat, VIEW_W*VIEW_H]} />
-      <instancedMesh ref={linesV} args={[lineGeom, lineMat, VIEW_W*VIEW_H]} />
-      <instancedMesh ref={bldgs} args={[bldgGeom, bldgMat, VIEW_W*VIEW_H]} castShadow receiveShadow />
-      <instancedMesh ref={cars} args={[carGeom, carMat, VIEW_W*VIEW_H]} castShadow receiveShadow />
+      <instancedMesh ref={roads} args={[plane, roadMat, VIEW_W*VIEW_H]} receiveShadow />
+      <instancedMesh ref={lines} args={[longPlane, lineMat, VIEW_W*VIEW_H]} />
+      <instancedMesh ref={walksL} args={[plane, walkMat, VIEW_W*VIEW_H]} receiveShadow />
+      <instancedMesh ref={walksR} args={[plane, walkMat, VIEW_W*VIEW_H]} receiveShadow />
+      <instancedMesh ref={curbsL} args={[curbGeom, curbMat, VIEW_W*VIEW_H]} receiveShadow />
+      <instancedMesh ref={curbsR} args={[curbGeom, curbMat, VIEW_W*VIEW_H]} receiveShadow />
+      <instancedMesh ref={bldgsL} args={[bldgGeom, bldgMat, VIEW_W*VIEW_H]} castShadow receiveShadow />
+      <instancedMesh ref={bldgsR} args={[bldgGeom, bldgMat, VIEW_W*VIEW_H]} castShadow receiveShadow />
+      <instancedMesh ref={palmsL} args={[palmTrunk, palmMat, VIEW_W*VIEW_H]} castShadow receiveShadow />
+      <instancedMesh ref={palmsR} args={[palmTrunk, palmMat, VIEW_W*VIEW_H]} castShadow receiveShadow />
+      <instancedMesh ref={leavesL} args={[palmLeaf, leafMat, VIEW_W*VIEW_H]} receiveShadow />
+      <instancedMesh ref={leavesR} args={[palmLeaf, leafMat, VIEW_W*VIEW_H]} receiveShadow />
       {digsInView.map(d => (
-        <Html key={`${d.x},${d.y}`} center transform distanceFactor={15}
-          position={[(d.x - ox - VIEW_W/2), 0.05, (d.y - oy - VIEW_H/2)]}>
+        <Html key={`${d.x},${d.y}`} center transform distanceFactor={20}
+          position={[(0), 0.05, (d.y - oy - VIEW_H/2)]}>
           <div className="text-[10px] md:text-xs tracking-widest font-bold text-cyan-300/90"
             style={{ textShadow: '0 0 6px #00fff0' }}>{d.initials}</div>
         </Html>
@@ -257,32 +287,27 @@ function City({ ox, oy, digsInView }:{ox:number,oy:number,digsInView:any[]}){
   )
 }
 
-// --- Controls: pointer lock + WASD movement ---
 function StreetControls({ setHovered, ox, oy }:{ setHovered:(v:any)=>void, ox:number, oy:number }){
   const { camera, gl } = useThree()
-  const velocity = useRef(new THREE.Vector3())
-  const dir = useRef(new THREE.Vector3())
-  const keys = useRef<{[k:string]:boolean}>({})
   const raycaster = useMemo(()=>new THREE.Raycaster(),[])
   const plane = useMemo(()=>new THREE.Plane(new THREE.Vector3(0,1,0), 0),[])
+  const keys = useRef<{[k:string]:boolean}>({})
+  const v = useRef(new THREE.Vector3())
+  const dir = useRef(new THREE.Vector3())
 
   useEffect(()=>{
-    camera.position.set(0, 1.7, 6)
-    camera.lookAt(0,1.6,0)
-    gl.shadowMap.enabled = true
-    gl.toneMapping = THREE.ACESFilmicToneMapping
-    gl.toneMappingExposure = 1.0
-  }, [camera, gl])
+    camera.position.set(0, 1.75, 8)
+    camera.lookAt(0,1.7,0)
+    gl.shadowMap.enabled = True
+  },[camera, gl])
 
   useEffect(()=>{
     const down = (e:KeyboardEvent)=>{ keys.current[e.key.toLowerCase()] = true }
     const up = (e:KeyboardEvent)=>{ keys.current[e.key.toLowerCase()] = false }
-    window.addEventListener('keydown', down)
-    window.addEventListener('keyup', up)
+    window.addEventListener('keydown', down); window.addEventListener('keyup', up)
     return ()=>{ window.removeEventListener('keydown', down); window.removeEventListener('keyup', up) }
   }, [])
 
-  // simple loop
   useThree(({ clock })=>{
     const dt = Math.min(0.05, clock.getDelta())
     dir.current.set(0,0,0)
@@ -291,30 +316,26 @@ function StreetControls({ setHovered, ox, oy }:{ setHovered:(v:any)=>void, ox:nu
     if (keys.current['a']) dir.current.x -= 1
     if (keys.current['d']) dir.current.x += 1
     dir.current.normalize()
-    const speed = 6
-    velocity.current.copy(dir.current).applyQuaternion(camera.quaternion).multiplyScalar(speed*dt)
-    camera.position.add( new THREE.Vector3(velocity.current.x, 0, velocity.current.z) )
+    v.current.copy(dir.current).applyQuaternion(camera.quaternion).multiplyScalar(6*dt)
+    camera.position.add(new THREE.Vector3(v.current.x, 0, v.current.z))
   })
 
-  // update hovered from crosshair center
   useEffect(()=>{
-    const onMove = ()=>{
-      // cast from camera forward
+    const onTick = ()=>{
       raycaster.setFromCamera(new THREE.Vector2(0,0), camera as any)
       const p = new THREE.Vector3()
       raycaster.ray.intersectPlane(plane, p)
-      const gx = Math.round(p.x + VIEW_W/2)
+      const gx = Math.round(p.x + VIEW_W/2) // not used for X (street aligned), but keep mapping
       const gy = Math.round(p.z + VIEW_H/2)
       const wx = clamp(ox + gx, 0, WORLD_W-1)
       const wy = clamp(oy + gy, 0, WORLD_H-1)
-      if (gx>=0 && gx<VIEW_W && gy>=0 && gy<VIEW_H) setHovered({ x: wx, y: wy })
+      if (gy>=0 && gy<VIEW_H) setHovered({ x: wx, y: wy })
       else setHovered(null)
     }
-    const id = setInterval(onMove, 50)
-    return ()=>clearInterval(id)
+    const id = setInterval(onTick, 50); return ()=>clearInterval(id)
   }, [camera, ox, oy, setHovered, raycaster, plane])
 
-  return <PointerLockControls selector="#street-enter" />
+  return <PointerLockControls selector="#enter-street" />
 }
 
 export default function App(){
@@ -346,7 +367,7 @@ export default function App(){
     <div className="min-h-screen w-full" style={{ background: '#0b0f14', color: 'white' }}>
       <header className="flex items-center justify-between p-4 md:p-6 border-b border-cyan-500/20 sticky top-0 z-20" style={{ background: '#0b0f14CC', backdropFilter:'blur(6px)' }}>
         <h1 className="text-xl md:text-2xl font-extrabold tracking-tight">CYBER HUNT<span className="text-cyan-400">.</span></h1>
-        <button id="street-enter" className="rounded px-3 py-2 bg-cyan-600 hover:bg-cyan-500">Click to enter Street View</button>
+        <button id="enter-street" className="rounded px-3 py-2 bg-cyan-600 hover:bg-cyan-500">Click to enter Street View</button>
       </header>
 
       <main className="grid md:grid-cols-[320px_1fr] gap-4 md:gap-6 p-4 md:p-6">
@@ -366,10 +387,8 @@ export default function App(){
                 <div className="text-xs text-white/60">Extra digs</div>
               </div>
             </div>
-            <div className="text-sm text-white/70">Controls: Click the button above to lock the mouse. Use <b>W/A/S/D</b> to walk; click <b>Dig</b> to excavate the tile under the crosshair.</div>
-            <div className="flex gap-2">
-              <button onClick={handleDig} className="bg-cyan-600 hover:bg-cyan-500 w-full rounded-lg px-3 py-2 font-semibold">DIG</button>
-            </div>
+            <div className="text-sm text-white/70">Click the button above to lock the mouse. Use <b>W/A/S/D</b> to walk. Click <b>DIG</b> to excavate the tile under the crosshair.</div>
+            <button onClick={handleDig} className="mt-2 bg-cyan-600 hover:bg-cyan-500 w-full rounded-lg px-3 py-2 font-semibold">DIG</button>
             <div className="text-xs text-white/40 pt-2">
               {ended ? <div className="text-fuchsia-300">Game ended. Treasure found at ({ended.x}, {ended.y}).</div> : <div>Find the hidden cache. First to hit the exact square wins. 🏴‍☠️</div>}
             </div>
@@ -377,16 +396,15 @@ export default function App(){
         </div>
 
         <div className="relative rounded-2xl overflow-hidden border border-cyan-500/20" style={{ height: '70vh' }}>
-          <Canvas shadows camera={{ fov: 60 }}>
-            <directionalLight position={[20, 30, 10]} intensity={1.2} castShadow shadow-mapSize-width={2048} shadow-mapSize-height={2048} />
-            <hemisphereLight skyColor={'#88a'} groundColor={'#223'} intensity={0.5} />
+          <Canvas shadows camera={{ fov: 65 }}>
+            <hemisphereLight skyColor={'#9bb'} groundColor={'#223'} intensity={0.6} />
+            <directionalLight position={[12, 20, 6]} intensity={1.4} castShadow shadow-mapSize-width={2048} shadow-mapSize-height={2048} />
 
             <StreetControls setHovered={setHovered} ox={ox} oy={oy} />
-            <City ox={ox} oy={oy} digsInView={digs} />
+            <Street ox={ox} oy={oy} digsInView={digs} />
 
-            {/* crosshair */}
             <Html center>
-              <div style={{ width: 12, height: 12, borderRadius: 9999, border: '2px solid rgba(255,255,255,0.8)' }}></div>
+              <div style={{ width: 10, height: 10, borderRadius: 9999, border: '2px solid rgba(255,255,255,0.9)' }}></div>
             </Html>
           </Canvas>
         </div>
