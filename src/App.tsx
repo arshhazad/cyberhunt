@@ -250,6 +250,41 @@ function MiniMap({ ox, oy, digs, player }:{ox:number,oy:number,digs:any[],player
   return <canvas ref={ref} width={160} height={160} className="rounded-lg border border-white/10" />
 }
 
+
+// Simple flag and chest components
+function Flag({ position }:{ position:[number, number, number] }){
+  return (
+    <group position={position}>
+      <mesh position={[0,0.2,0]}>
+        <cylinderGeometry args={[0.03,0.03,0.4,8]} />
+        <meshStandardMaterial color={'#b0a38a'} />
+      </mesh>
+      <mesh position={[0.12,0.38,0]} rotation-y={Math.PI/2}>
+        <planeGeometry args={[0.28,0.16]} />
+        <meshStandardMaterial color={'#e53935'} side={THREE.DoubleSide} />
+      </mesh>
+    </group>
+  )
+}
+
+function Chest({ position }:{ position:[number, number, number] }){
+  return (
+    <group position={position}>
+      <mesh position={[0,0.15,0]}>
+        <boxGeometry args={[0.5,0.3,0.3]} />
+        <meshStandardMaterial color={'#8d6e63'} />
+      </mesh>
+      <mesh position={[0,0.32,0]}>
+        <boxGeometry args={[0.5,0.1,0.3]} />
+        <meshStandardMaterial color={'#5d4037'} />
+      </mesh>
+      <mesh position={[0.23,0.18,0]}>
+        <boxGeometry args={[0.04,0.08,0.04]} />
+        <meshStandardMaterial color={'#ffeb3b'} />
+      </mesh>
+    </group>
+  )
+}
 // Desert surface & environment
 function Desert({ ox, oy, digsInView }:{ox:number,oy:number,digsInView:any[]}){
   const sand = useTexture('/textures_desert_plus/sand.jpg')
@@ -331,11 +366,14 @@ function Desert({ ox, oy, digsInView }:{ox:number,oy:number,digsInView:any[]}){
       <instancedMesh ref={bushes} args={[bushGeom, bushMat, 800]} castShadow={false} receiveShadow={false} rotation-y={Math.PI/4} />
       <MileMarkers />
       {digsInView.map(d => (
-        <Html key={`${d.x},${d.y}`} center transform distanceFactor={25}
-          position={[(d.x - ox - VIEW_W/2), duneHeight(d.x - ox - VIEW_W/2, d.y - oy - VIEW_H/2)+0.3, (d.y - oy - VIEW_H/2)]}>
-          <div className="text-[10px] md:text-xs tracking-widest font-bold text-amber-200/90"
-            style={{ textShadow: '0 0 6px rgba(255,220,120,0.8)' }}>{d.initials}</div>
-        </Html>
+        <>
+          <Flag position={[(d.x - ox - VIEW_W/2), duneHeight(d.x - ox - VIEW_W/2, d.y - oy - VIEW_H/2)+0.05, (d.y - oy - VIEW_H/2)]} />
+          <Html center transform distanceFactor={25}
+            position={[(d.x - ox - VIEW_W/2), duneHeight(d.x - ox - VIEW_W/2, d.y - oy - VIEW_H/2)+0.5, (d.y - oy - VIEW_H/2)]}>
+            <div className="text-[10px] md:text-xs tracking-widest font-bold text-amber-200/90"
+              style={{ textShadow: '0 0 6px rgba(255,220,120,0.8)' }}>{d.initials}</div>
+          </Html>
+        </>
       ))}
       <Dust count={1500} />
     </group>
@@ -459,7 +497,7 @@ export default function App(){
       <header className="flex items-center justify-between p-4 md:p-6 border-b border-amber-500/20 sticky top-0 z-20" style={{ background: '#0b0f14CC', backdropFilter:'blur(6px)' }}>
         <h1 className="text-xl md:text-2xl font-extrabold tracking-tight">CYBER HUNT<span className="text-amber-400">.</span></h1>
         <div className="flex items-center gap-2">
-          <button id="enter-desert" className="rounded px-3 py-2 bg-amber-600 hover:bg-amber-500">Click to enter Desert View</button>
+          <button  className="rounded px-3 py-2 bg-amber-600 hover:bg-amber-500">Click to enter Desert View</button>
           <button className="rounded px-3 py-2 bg-white/10 hover:bg-white/20" onClick={()=>setMode(m=>m==='fp'?'tp':'fp')}>{mode==='fp'?'3rd person':'1st person'}</button>
           <button className="rounded px-3 py-2 bg-white/10 hover:bg-white/20" onClick={()=>setShowMap(s=>!s)}>{showMap?'Hide Map':'Map'}</button>
         </div>
@@ -509,7 +547,7 @@ export default function App(){
             
             
 
-            <PointerLockControls selector="#enter-desert" />
+            <PointerLockControls />
             <Html center>
               <div style={{ width: 10, height: 10, borderRadius: 9999, border: '2px solid rgba(255,255,255,0.9)' }}></div>
             </Html>
