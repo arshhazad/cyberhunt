@@ -1,6 +1,6 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { Canvas, useThree } from '@react-three/fiber'
+import { Canvas, useThree, useFrame } from '@react-three/fiber'
 import { Html, PointerLockControls, useTexture } from '@react-three/drei'
 import * as THREE from 'three'
 
@@ -137,7 +137,7 @@ function Street({ ox, oy, digsInView }:{ox:number,oy:number,digsInView:any[]}){
     gl.shadowMap.enabled = true
   },[scene, gl, sky])
 
-  ;[asphalt, sidewalk, facade].forEach(t=>{ t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(6,6); (t as any).anisotropy = 8 })
+  ;[asphalt, sidewalk, facade].forEach((t:any)=>{ t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(6,6); t.anisotropy = 8 })
 
   const plane = useMemo(()=> new THREE.PlaneGeometry(1,1), [])
   const longPlane = useMemo(()=> new THREE.PlaneGeometry(1,0.2), [])
@@ -170,81 +170,62 @@ function Street({ ox, oy, digsInView }:{ox:number,oy:number,digsInView:any[]}){
   const cells = VIEW_W*VIEW_H
   useEffect(()=>{
     ;[roads,walksL,walksR,lines,curbsL,curbsR,bldgsL,bldgsR,palmsL,palmsR,leavesL,leavesR].forEach(m=>{ if(m.current) m.current.count = cells })
-  },[])
+  },[cells])
 
   useEffect(()=>{
+    if (!roads.current) return
     const dummy = new THREE.Object3D()
     let ri=0, wl=0, wr=0, li=0, cl=0, cr=0, bl=0, br=0, pl=0, pr=0, ll=0, lr=0
 
-    // We render a single long street along Z, centered X=0, with sidewalks at X=±2.5, buildings at ±4.2
     for (let yy=0; yy<VIEW_H; yy++){
+      const z = (yy - VIEW_H/2)
+      // road & strips
       for (let xx=0; xx<VIEW_W; xx++){
-        const z = (yy - VIEW_H/2)
-        const x = 0 // road center
-        // road tile
-        dummy.position.set(x, 0, z)
+        // Road
+        dummy.position.set(0, 0, z)
         dummy.rotation.set(-Math.PI/2,0,0); dummy.scale.set(6,1,1)
-        dummy.updateMatrix()
-        roads.current.setMatrixAt(ri++, dummy.matrix)
-
-        // lane markings
-        dummy.position.set(x, 0.002, z)
-        dummy.rotation.set(-Math.PI/2,0,0); dummy.scale.set(6,1,1)
-        dummy.updateMatrix()
-        lines.current.setMatrixAt(li++, dummy.matrix)
-
-        // sidewalks L/R
+        dummy.updateMatrix(); roads.current!.setMatrixAt(ri++, dummy.matrix)
+        // Lines
+        dummy.position.set(0, 0.002, z)
+        dummy.updateMatrix(); lines.current!.setMatrixAt(li++, dummy.matrix)
+        // sidewalks
         dummy.rotation.set(-Math.PI/2,0,0); dummy.scale.set(2,1,1)
-        dummy.position.set(-4, 0.001, z)
-        dummy.updateMatrix(); walksL.current.setMatrixAt(wl++, dummy.matrix)
-        dummy.position.set( 4, 0.001, z)
-        dummy.updateMatrix(); walksR.current.setMatrixAt(wr++, dummy.matrix)
-
+        dummy.position.set(-4, 0.001, z); dummy.updateMatrix(); walksL.current!.setMatrixAt(wl++, dummy.matrix)
+        dummy.position.set( 4, 0.001, z); dummy.updateMatrix(); walksR.current!.setMatrixAt(wr++, dummy.matrix)
         // curbs
         dummy.rotation.set(0,0,0); dummy.scale.set(2,1,1)
-        dummy.position.set(-3, 0.075, z)
-        dummy.updateMatrix(); curbsL.current.setMatrixAt(cl++, dummy.matrix)
-        dummy.position.set( 3, 0.075, z)
-        dummy.updateMatrix(); curbsR.current.setMatrixAt(cr++, dummy.matrix)
+        dummy.position.set(-3, 0.075, z); dummy.updateMatrix(); curbsL.current!.setMatrixAt(cl++, dummy.matrix)
+        dummy.position.set( 3, 0.075, z); dummy.updateMatrix(); curbsR.current!.setMatrixAt(cr++, dummy.matrix)
+      }
+      // buildings/palms at intervals
+      if (yy % 6 === 0){
+        const hL = 5 + seeded(0,yy)*8
+        dummy.position.set(-5.5, hL/2, z)
+        dummy.rotation.set(0, seeded(7,yy+3)*Math.PI*2, 0)
+        dummy.scale.set(1.5, hL, 1.2)
+        dummy.updateMatrix(); bldgsL.current!.setMatrixAt(bl++, dummy.matrix)
 
-        // buildings every ~6 units
-        if (yy % 6 === 0){
-          const hL = 5 + seeded(xx,yy)*8
-          dummy.position.set(-5.5, hL/2, z)
-          dummy.rotation.set(0, seeded(xx+7,yy+3)*Math.PI*2, 0)
-          dummy.scale.set(1.5, hL, 1.2)
-          dummy.updateMatrix(); bldgsL.current.setMatrixAt(bl++, dummy.matrix)
-
-          const hR = 5 + seeded(xx+13,yy+11)*8
-          dummy.position.set(5.5, hR/2, z)
-          dummy.rotation.set(0, seeded(xx+17,yy+5)*Math.PI*2, 0)
-          dummy.scale.set(1.5, hR, 1.2)
-          dummy.updateMatrix(); bldgsR.current.setMatrixAt(br++, dummy.matrix)
+        const hR = 5 + seeded(13,yy+11)*8
+        dummy.position.set(5.5, hR/2, z)
+        dummy.rotation.set(0, seeded(17,yy+5)*Math.PI*2, 0)
+        dummy.scale.set(1.5, hR, 1.2)
+        dummy.updateMatrix(); bldgsR.current!.setMatrixAt(br++, dummy.matrix)
+      }
+      if (yy % 12 === 0){
+        dummy.position.set(-4.8, 1.5, z); dummy.rotation.set(0,0,0); dummy.scale.set(1,1,1)
+        dummy.updateMatrix(); palmsL.current!.setMatrixAt(pl++, dummy.matrix)
+        for (let k=0;k<6;k++){
+          const leaf = new THREE.Object3D()
+          leaf.position.set(-4.8, 3.0, z)
+          leaf.rotation.set(Math.PI/2.8, (k/6)*Math.PI*2, 0)
+          leaf.updateMatrix(); leavesL.current!.setMatrixAt(ll++, leaf.matrix)
         }
-
-        // palms every ~12 units
-        if (yy % 12 === 0){
-          // left
-          dummy.position.set(-4.8, 1.5, z)
-          dummy.rotation.set(0,0,0)
-          dummy.scale.set(1,1,1)
-          dummy.updateMatrix(); palmsL.current.setMatrixAt(pl++, dummy.matrix)
-          for (let k=0;k<6;k++){
-            const leaf = new THREE.Object3D()
-            leaf.position.set(-4.8, 3.0, z)
-            leaf.rotation.set(Math.PI/2.8, (k/6)*Math.PI*2, 0)
-            leaf.scale.set(1,1,1)
-            leaf.updateMatrix(); leavesL.current.setMatrixAt(ll++, leaf.matrix)
-          }
-          // right
-          dummy.position.set(4.8, 1.5, z); dummy.updateMatrix(); palmsR.current.setMatrixAt(pr++, dummy.matrix)
-          for (let k=0;k<6;k++){
-            const leaf = new THREE.Object3D()
-            leaf.position.set(4.8, 3.0, z)
-            leaf.rotation.set(Math.PI/2.8, (k/6)*Math.PI*2, 0)
-            leaf.scale.set(1,1,1)
-            leaf.updateMatrix(); leavesR.current.setMatrixAt(lr++, leaf.matrix)
-          }
+        dummy.position.set(4.8, 1.5, z); dummy.updateMatrix(); palmsR.current!.setMatrixAt(pr++, dummy.matrix)
+        for (let k=0;k<6;k++){
+          const leaf = new THREE.Object3D()
+          leaf.position.set(4.8, 3.0, z)
+          leaf.rotation.set(Math.PI/2.8, (k/6)*Math.PI*2, 0)
+          leaf.updateMatrix(); leavesR.current!.setMatrixAt(lr++, leaf.matrix)
         }
       }
     }
@@ -298,7 +279,7 @@ function StreetControls({ setHovered, ox, oy }:{ setHovered:(v:any)=>void, ox:nu
   useEffect(()=>{
     camera.position.set(0, 1.75, 8)
     camera.lookAt(0,1.7,0)
-    gl.shadowMap.enabled = True
+    gl.shadowMap.enabled = true
   },[camera, gl])
 
   useEffect(()=>{
@@ -308,31 +289,31 @@ function StreetControls({ setHovered, ox, oy }:{ setHovered:(v:any)=>void, ox:nu
     return ()=>{ window.removeEventListener('keydown', down); window.removeEventListener('keyup', up) }
   }, [])
 
-  useThree(({ clock })=>{
-    const dt = Math.min(0.05, clock.getDelta())
+  useFrame((state, dt)=>{
+    const delta = Math.min(0.05, dt)
     dir.current.set(0,0,0)
     if (keys.current['w']) dir.current.z -= 1
     if (keys.current['s']) dir.current.z += 1
     if (keys.current['a']) dir.current.x -= 1
     if (keys.current['d']) dir.current.x += 1
     dir.current.normalize()
-    v.current.copy(dir.current).applyQuaternion(camera.quaternion).multiplyScalar(6*dt)
+    v.current.copy(dir.current).applyQuaternion(camera.quaternion).multiplyScalar(6*delta)
     camera.position.add(new THREE.Vector3(v.current.x, 0, v.current.z))
   })
 
   useEffect(()=>{
-    const onTick = ()=>{
+    const id = setInterval(()=>{
       raycaster.setFromCamera(new THREE.Vector2(0,0), camera as any)
       const p = new THREE.Vector3()
       raycaster.ray.intersectPlane(plane, p)
-      const gx = Math.round(p.x + VIEW_W/2) // not used for X (street aligned), but keep mapping
+      const gx = Math.round(p.x + VIEW_W/2)
       const gy = Math.round(p.z + VIEW_H/2)
       const wx = clamp(ox + gx, 0, WORLD_W-1)
       const wy = clamp(oy + gy, 0, WORLD_H-1)
       if (gy>=0 && gy<VIEW_H) setHovered({ x: wx, y: wy })
       else setHovered(null)
-    }
-    const id = setInterval(onTick, 50); return ()=>clearInterval(id)
+    }, 50)
+    return ()=>clearInterval(id)
   }, [camera, ox, oy, setHovered, raycaster, plane])
 
   return <PointerLockControls selector="#enter-street" />
