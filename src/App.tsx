@@ -5,23 +5,20 @@ import { Html, PointerLockControls, useTexture } from '@react-three/drei'
 import * as THREE from 'three'
 
 /**
- * Cyber Hunt — Desert Fix Build (no postprocessing; R3F v8-friendly)
- * - Click inside the 3D canvas to lock the mouse (browser requirement)
- * - Move with WASD (Shift = sprint)
- * - Hover ring + arrow shows exactly where you'll dig
- * - Click the 3D canvas to dig at the highlighted spot
- * - Miss => red flag + initials; Hit => chest & game ends
- * - Minimap + Map overlay for current window
+ * Cyber Hunt — Mobile + FPV Fix + Buy Digs
+ * - Desktop: click canvas once to lock mouse, WASD + Shift to move, click to dig
+ * - Mobile: drag on canvas to look, left joystick to move, single tap to dig
+ * - Header "Buy 5 digs" adds extra digs (local storage)
+ * - Ring + arrow indicator; flags on miss; chest on hit; minimap & map
+ * - No postprocessing deps (works with React 18 / R3F v8)
  */
 
-// ---- World config (keep 10M sq ft: ~3163 x 3162) ----
 const WORLD_W = 3163
 const WORLD_H = 3162
 const VIEW_W = 200
 const VIEW_H = 200
 const DAILY_FREE_DIGS = 1
 
-// ---- Storage keys ----
 const KEY = {
   DIGS: 'cth_digs',
   USER: 'cth_user',
@@ -32,11 +29,11 @@ const KEY = {
   EXTRA: 'cth_extra_digs',
 }
 
+const isMobile = typeof navigator !== 'undefined' && /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent)
 const clamp = (v:number,a:number,b:number)=>Math.max(a,Math.min(b,v))
 const today = () => new Date().toISOString().slice(0,10)
 const randInt = (min:number,max:number)=>Math.floor(Math.random()*(max-min+1))+min
 
-// ---- Persistence helpers ----
 function getUser(){
   const u = localStorage.getItem(KEY.USER)
   if (u) return JSON.parse(u)
@@ -88,15 +85,12 @@ function digsLeft(){
   return { free: Math.max(0, DAILY_FREE_DIGS - used), extra }
 }
 
-// ---- Server-ish API (localStorage-backed) ----
 const api = {
   async window(ox:number,oy:number,w:number,h:number){
     const digs = loadDigs(), arr:any[] = []
     for (const k in digs){
       const [x,y] = k.split(',').map(Number)
-      if (x>=ox && x<ox+w && y>=oy && y<oy+h){
-        arr.push({ x, y, ...digs[k] })
-      }
+      if (x>=ox && x<ox+w && y>=oy && y<oy+h) arr.push({ x, y, ...digs[k] })
     }
     return arr
   },
@@ -108,8 +102,7 @@ const api = {
     if (digs[key]) return { ok:false, reason:'Already dug' }
     const allowance = digsLeft()
     if (allowance.free<=0 && allowance.extra<=0) return { ok:false, reason:'No digs left today' }
-    const v = { ownerId:user.id, initials:user.initials, ts:Date.now(), day:today() }
-    digs[key] = v
+    digs[key] = { ownerId:user.id, initials:user.initials, ts:Date.now(), day:today() }
     saveDigs(digs)
     if (allowance.free<=0 && allowance.extra>0) localStorage.setItem(KEY.EXTRA, String(allowance.extra-1))
     const t = getTreasure()
@@ -117,9 +110,15 @@ const api = {
     if (found) setEnded({ winnerId:user.id, x, y, ts:Date.now() })
     return { ok:true, found }
   },
+  async buy(count:number=5){
+    const prev = Number(localStorage.getItem(KEY.EXTRA) || 0)
+    const now = prev + count
+    localStorage.setItem(KEY.EXTRA, String(now))
+    return { ok:true, newBalance: now }
+  }
 }
 
-// ---- Dunes height ----
+// ---- Terrain ----
 function duneHeight(x:number,z:number){
   const a = Math.sin(x*0.06)*0.6 + Math.cos(z*0.05)*0.6
   const b = Math.sin((x+z)*0.025)*0.4 + Math.cos((x-z)*0.018)*0.35
@@ -225,7 +224,6 @@ function Desert({ ox, oy, digsInView }:{ox:number,oy:number,digsInView:any[]}){
     }
   },[])
 
-  // mile markers
   const markers = useMemo(()=>{
     const arr:JSX.Element[] = []
     for (let z=-90; z<=90; z+=10){
@@ -255,59 +253,106 @@ function Desert({ ox, oy, digsInView }:{ox:number,oy:number,digsInView:any[]}){
   )
 }
 
-// ---- Controls ----
-function Controls({ mode, setHovered, setOff, playerPos }:{mode:'fp'|'tp', setHovered:(v:any)=>void, setOff:(fn:(o:{ox:number,oy:number})=>{ox:number,oy:number})=>void, playerPos:THREE.Vector3}){
-  const { camera } = useThree()
+// ---- Controls (desktop + mobile) ----
+function Controls({ setHovered, setOff, playerPos }:{ setHovered:(v:any)=>void, setOff:(fn:(o:{ox:number,oy:number})=>{ox:number,oy:number})=>void, playerPos:THREE.Vector3 }){
+  const { camera, gl } = useThree()
   const keys = useRef<{[k:string]:boolean}>({})
   const vel = useRef(new THREE.Vector3())
   const dir = useRef(new THREE.Vector3())
   const ray = useMemo(()=>new THREE.Raycaster(),[])
   const plane = useMemo(()=> new THREE.Plane(new THREE.Vector3(0,1,0), 0), [])
+  const yaw = useRef(0)
+  const pitch = useRef(0)
+  const touchActive = useRef(false)
+  const lastTouch = useRef<{x:number,y:number}|null>(null)
+  const mobileDir = useRef<{x:number,z:number}>({x:0,z:0})
 
   useEffect(()=>{
-    camera.position.set(0, mode==='fp'?1.7:2.0, 6)
+    // init camera
+    camera.position.set(0, 1.7, 6)
     camera.lookAt(0,1.6,0)
-  },[camera, mode])
+    yaw.current = camera.rotation.y
+    pitch.current = camera.rotation.x
+  },[camera])
 
+  // Keyboard (desktop)
   useEffect(()=>{
+    if (isMobile) return
     const down = (e:KeyboardEvent)=>{ keys.current[e.key.toLowerCase()] = true }
     const up = (e:KeyboardEvent)=>{ keys.current[e.key.toLowerCase()] = false }
     window.addEventListener('keydown',down); window.addEventListener('keyup',up)
     return ()=>{ window.removeEventListener('keydown',down); window.removeEventListener('keyup',up) }
   }, [])
 
+  // Touch look (mobile)
+  useEffect(()=>{
+    if (!isMobile) return
+    const el = gl.domElement
+    const onTS = (e:TouchEvent)=>{ touchActive.current = true; lastTouch.current = { x:e.touches[0].clientX, y:e.touches[0].clientY } }
+    const onTM = (e:TouchEvent)=>{
+      if (!touchActive.current || !lastTouch.current) return
+      const nx = e.touches[0].clientX, ny = e.touches[0].clientY
+      const dx = nx - lastTouch.current.x
+      const dy = ny - lastTouch.current.y
+      lastTouch.current = { x:nx, y:ny }
+      yaw.current -= dx * 0.003
+      pitch.current = clamp(pitch.current - dy * 0.003, -Math.PI/2+0.1, Math.PI/2-0.1)
+    }
+    const onTE = ()=>{ touchActive.current = false; lastTouch.current = null }
+    el.addEventListener('touchstart', onTS, { passive:false })
+    el.addEventListener('touchmove', onTM, { passive:false })
+    el.addEventListener('touchend', onTE, { passive:false })
+    return ()=>{
+      el.removeEventListener('touchstart', onTS as any)
+      el.removeEventListener('touchmove', onTM as any)
+      el.removeEventListener('touchend', onTE as any)
+    }
+  }, [gl])
+
+  // Hook for joystick to update mobileDir via window
+  useEffect(()=>{
+    (window as any).__cy_dir = (v:{x:number,z:number})=>{ mobileDir.current = v }
+  }, [])
+
   useFrame((state, dt)=>{
     const delta = Math.min(0.05, dt)
+
+    // Apply look rotation
+    if (isMobile){
+      camera.rotation.set(pitch.current, yaw.current, 0, 'YXZ')
+    }
+
+    // Desired move direction
     dir.current.set(0,0,0)
-    if (keys.current['w']) dir.current.z -= 1
-    if (keys.current['s']) dir.current.z += 1
-    if (keys.current['a']) dir.current.x -= 1
-    if (keys.current['d']) dir.current.x += 1
-    dir.current.normalize()
-    const speed = keys.current['shift'] ? 16 : 8
+    if (isMobile){
+      dir.current.x += mobileDir.current.x
+      dir.current.z += mobileDir.current.z
+    } else {
+      if (keys.current['w']) dir.current.z -= 1
+      if (keys.current['s']) dir.current.z += 1
+      if (keys.current['a']) dir.current.x -= 1
+      if (keys.current['d']) dir.current.x += 1
+    }
+    if (dir.current.lengthSq()>0) dir.current.normalize()
+
+    const speed = (isMobile ? 10 : (keys.current['shift']?16:8))
     vel.current.copy(dir.current).applyQuaternion(camera.quaternion).multiplyScalar(speed*delta)
 
     camera.position.add(new THREE.Vector3(vel.current.x, 0, vel.current.z))
-    const y = duneHeight(camera.position.x, camera.position.z) + (mode==='fp'?1.7:2.2)
+    const y = duneHeight(camera.position.x, camera.position.z) + 1.7
     camera.position.y = THREE.MathUtils.lerp(camera.position.y, y, 0.6)
 
-    // update playerPos & "follow" camera for 3rd-person
+    // player position (for minimap)
     playerPos.set(camera.position.x, 0, camera.position.z)
-    if (mode==='tp'){
-      const back = new THREE.Vector3(0,0,-3).applyQuaternion(camera.quaternion)
-      const look = new THREE.Vector3().copy(playerPos)
-      camera.position.copy(playerPos).add(new THREE.Vector3(0,1.6,0)).add(back)
-      camera.lookAt(look.x, duneHeight(look.x, look.z)+1.6, look.z)
-    }
 
-    // Update view window offsets for storage mapping
+    // Update offsets for storage window
     setOff(o=>{
       const nx = clamp(Math.floor(o.ox + vel.current.x), 0, WORLD_W - VIEW_W)
       const ny = clamp(Math.floor(o.oy + vel.current.z), 0, WORLD_H - VIEW_H)
       return (nx!==o.ox || ny!==o.oy) ? {ox:nx, oy:ny} : o
     })
 
-    // Hovered position under crosshair
+    // Hover under crosshair
     ray.setFromCamera(new THREE.Vector2(0,0), camera as any)
     const p = new THREE.Vector3()
     if (ray.ray.intersectPlane(plane, p)){
@@ -331,7 +376,6 @@ function MiniMap({ ox, oy, digs, player }:{ox:number,oy:number,digs:any[],player
     const w=c.width, h=c.height
     ctx.clearRect(0,0,w,h)
     ctx.fillStyle = '#b8925c'; ctx.fillRect(0,0,w,h)
-    // dug cells
     ctx.fillStyle = 'rgba(0,0,0,0.4)'
     digs.forEach((d:any)=>{
       const x = (d.x - ox) / VIEW_W * w
@@ -339,7 +383,6 @@ function MiniMap({ ox, oy, digs, player }:{ox:number,oy:number,digs:any[],player
       const cs = Math.max(2, w/VIEW_W)
       ctx.fillRect(x, y, cs, cs)
     })
-    // player
     ctx.fillStyle = '#00e5ff'
     const px = (player.x - ox) / VIEW_W * w
     const py = (player.y - oy) / VIEW_H * h
@@ -349,13 +392,63 @@ function MiniMap({ ox, oy, digs, player }:{ox:number,oy:number,digs:any[],player
   return <canvas ref={ref} width={160} height={160} className="rounded-lg border border-white/10" />
 }
 
-// ---- Main App ----
+// ---- Joystick (mobile) ----
+function Joystick(){
+  if (!isMobile) return null
+  // Very light virtual joystick: left circle controls x/z
+  const ref = useRef<HTMLDivElement>(null!)
+  const knob = useRef<HTMLDivElement>(null!)
+  const center = useRef<{x:number,y:number}|null>(null)
+  const move = (cx:number, cy:number, x:number, y:number)=>{
+    const dx = x - cx, dy = y - cy
+    const r = 45 // radius px
+    const len = Math.min(r, Math.hypot(dx, dy))
+    const angle = Math.atan2(dy, dx)
+    const tx = Math.cos(angle)*len, ty = Math.sin(angle)*len
+    if (knob.current){ knob.current.style.transform = `translate(${tx}px, ${ty}px)` }
+    const nx = (tx/r) // -1..1
+    const ny = (ty/r) // -1..1
+    ;(window as any).__cy_dir && (window as any).__cy_dir({ x: nx, z: ny })
+  }
+  useEffect(()=>{
+    const el = ref.current
+    if (!el) return
+    const onTS = (e:TouchEvent)=>{
+      const rect = el.getBoundingClientRect()
+      const cx = rect.left + rect.width/2, cy = rect.top + rect.height/2
+      center.current = { x:cx, y:cy }
+      move(cx, cy, e.touches[0].clientX, e.touches[0].clientY)
+    }
+    const onTM = (e:TouchEvent)=>{
+      if (!center.current) return
+      move(center.current.x, center.current.y, e.touches[0].clientX, e.touches[0].clientY)
+    }
+    const onTE = ()=>{
+      center.current = null
+      if (knob.current){ knob.current.style.transform = `translate(0px, 0px)` }
+      ;(window as any).__cy_dir && (window as any).__cy_dir({ x: 0, z: 0 })
+    }
+    el.addEventListener('touchstart', onTS)
+    window.addEventListener('touchmove', onTM)
+    window.addEventListener('touchend', onTE)
+    return ()=>{
+      el.removeEventListener('touchstart', onTS)
+      window.removeEventListener('touchmove', onTM)
+      window.removeEventListener('touchend', onTE)
+    }
+  },[])
+  return (
+    <div className="absolute left-3 bottom-3 md:hidden" style={{width:120,height:120,borderRadius:60,background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.15)',touchAction:'none'}} ref={ref}>
+      <div ref={knob} style={{width:60,height:60,borderRadius:30,background:'rgba(255,255,255,0.2)',position:'absolute',left:30,top:30,transform:'translate(0px,0px)'}}/>
+    </div>
+  )
+}
+
 export default function App(){
   const [user, setUser] = useState<any>(null)
   const [{ox,oy}, setOff] = useState(getOffset())
   const [hovered, setHovered] = useState<{x:number,y:number,worldX:number,worldY:number}|null>(null)
   const [digs, setDigs] = useState<any[]>([])
-  const [mode, setMode] = useState<'fp'|'tp'>('fp')
   const [showMap, setShowMap] = useState(false)
   const ended = getEnded()
   const playerPos = useRef(new THREE.Vector3(0,0,0))
@@ -381,10 +474,13 @@ export default function App(){
     const res = await api.dig(wx, wy)
     if (!res.ok){ alert(res.reason); return }
     const a = digsLeft(); setFree(a.free); setExtra(a.extra)
-    if (res.found){
-      alert('🎉 Treasure found! The game is over.')
-    }
+    if (res.found){ alert('🎉 Treasure found! The game is over.') }
     const win = await api.window(ox,oy,VIEW_W,VIEW_H); setDigs(win)
+  }
+
+  const handleBuy = async()=>{
+    const r = await api.buy(5)
+    if (r.ok){ setExtra(r.newBalance) }
   }
 
   return (
@@ -392,7 +488,7 @@ export default function App(){
       <header className="flex items-center justify-between p-4 md:p-6 border-b border-amber-500/20 sticky top-0 z-20" style={{ background:'#0b0f14CC', backdropFilter:'blur(6px)' }}>
         <h1 className="text-xl md:text-2xl font-extrabold tracking-tight">CYBER HUNT<span className="text-amber-400">.</span></h1>
         <div className="flex items-center gap-2">
-          <button className="rounded px-3 py-2 bg-white/10 hover:bg-white/20" onClick={(e)=>{e.stopPropagation(); setMode(m=>m==='fp'?'tp':'fp')}}>{mode==='fp'?'3rd person':'1st person'}</button>
+          <button className="rounded px-3 py-2 bg-amber-600 hover:bg-amber-500" onClick={(e)=>{e.stopPropagation(); handleBuy()}}>Buy 5 digs</button>
           <button className="rounded px-3 py-2 bg-white/10 hover:bg-white/20" onClick={(e)=>{e.stopPropagation(); setShowMap(s=>!s)}}>{showMap?'Hide Map':'Map'}</button>
         </div>
       </header>
@@ -416,9 +512,9 @@ export default function App(){
               </div>
             </div>
             <div className="text-sm text-white/70">
-              Click inside the desert once to enable look controls.<br/>
-              Use <b>W/A/S/D</b> to walk, <b>Shift</b> to sprint.<br/>
-              <b>Click the desert</b> to dig at the highlighted ring/arrow.
+              Desktop: click the canvas once, then use <b>W/A/S/D</b> (Shift = sprint).<br/>
+              Mobile: drag to look, use the left joystick to move.<br/>
+              Tap/click the canvas to dig at the highlighted ring/arrow.
             </div>
 
             <div className="pt-4 border-t border-white/10">
@@ -445,7 +541,10 @@ export default function App(){
             <hemisphereLight skyColor={'#ffe'} groundColor={'#a86'} intensity={0.7} />
             <directionalLight position={[18, 28, -12]} intensity={1.2} color={'#ffcf8a'} castShadow shadow-mapSize-width={2048} shadow-mapSize-height={2048} />
 
-            <Controls mode={mode} setHovered={setHovered} setOff={setOff} playerPos={playerPos.current} />
+            {/* Desktop pointer lock; on mobile we use touch-look so this is harmless */}
+            <PointerLockControls enabled={!isMobile} />
+
+            <Controls setHovered={setHovered} setOff={setOff} playerPos={playerPos.current} />
             <Desert ox={ox} oy={oy} digsInView={digs} />
 
             {/* Hover indicator */}
@@ -464,10 +563,11 @@ export default function App(){
               <Chest position={[ended.x - ox - VIEW_W/2, duneHeight(ended.x - ox - VIEW_W/2, ended.y - oy - VIEW_H/2)+0.1, ended.y - oy - VIEW_H/2]} />
             )}
 
-            {/* Lock after first click on canvas */}
-            <PointerLockControls />
             <Html center><div style={{ width:10, height:10, borderRadius:9999, border:'2px solid rgba(255,255,255,0.9)' }} /></Html>
           </Canvas>
+
+          {/* Mobile joystick */}
+          <Joystick />
 
           {/* World map overlay */}
           {showMap && (
