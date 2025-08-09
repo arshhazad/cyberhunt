@@ -1,15 +1,18 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Canvas, useThree, useFrame } from '@react-three/fiber'
-import { Html, PointerLockControls, useTexture } from '@react-three/drei'
+import { Html, PointerLockControls, useTexture, shaderMaterial, Effects } from '@react-three/drei'
 import * as THREE from 'three'
+import { EffectComposer, Bloom, Noise, Vignette } from '@react-three/postprocessing'
 
-/**
- * Cyber Hunt — Desert Pack
- * - Large desert with dunes (procedural), rocks, bushes, cacti
- * - First-person movement (WASD, Shift to sprint). Click the header button to lock mouse.
- * - Click DIG to excavate the 1x1 ft tile under the crosshair
- * - Keeps treasure/digging logic and 10M sq ft world size
+/** Desert Pack Plus
+ * - Golden hour lighting + warm sky
+ * - Dust particles
+ * - Subtle heat-haze shimmer (post + noise)
+ * - Stick figure player (toggle 1st/3rd-person)
+ * - Mobile controls (Move / Left / Right)
+ * - Highway distance markers
+ * - Minimap with dug cells + player position
  */
 
 const WORLD_W = 3163
@@ -125,21 +128,137 @@ const api = {
   }
 }
 
-// ---------- Desert scene ----------
-
-// dune height function (deterministic)
+// --- Scene helpers
 function duneHeight(x:number, z:number){
   const f1 = Math.sin(x*0.06) * 0.6 + Math.cos(z*0.05) * 0.6
   const f2 = Math.sin((x+z)*0.025) * 0.4 + Math.cos((x-z)*0.018) * 0.35
   return (f1 + f2) * 0.6
 }
 
+// Dust particles
+function Dust({ count=2000 }:{count?:number}){
+  const ref = useRef<THREE.Points>(null!)
+  const positions = useMemo(()=>{
+    const arr = new Float32Array(count*3)
+    for(let i=0;i<count;i++){
+      arr[i*3+0] = (Math.random()-0.5)*180
+      arr[i*3+1] = Math.random()*2 + 0.2
+      arr[i*3+2] = (Math.random()-0.5)*180
+    }
+    return arr
+  },[count])
+  useFrame((state, dt)=>{
+    if (!ref.current) return
+    const a = ref.current.geometry.attributes.position as THREE.BufferAttribute
+    for(let i=0;i<count;i++){
+      const y = a.getY(i) + (Math.sin(state.clock.elapsedTime*0.6 + i)*0.001 + 0.02)
+      const x = a.getX(i) + 0.01
+      a.setY(i, (y>3?0.2:y))
+      a.setX(i, (x>90?-90:x))
+    }
+    a.needsUpdate = true
+  })
+  const mat = useMemo(()=> new THREE.PointsMaterial({ size: 0.06, color: new THREE.Color('#e6c08c'), transparent:true, opacity:0.65, depthWrite:false }), [])
+  return <points ref={ref}>
+    <bufferGeometry>
+      <bufferAttribute attach="attributes-position" count={positions.length/3} array={positions} itemSize={3} />
+    </bufferGeometry>
+    <pointsMaterial attach="material" {...(mat as any)} />
+  </points>
+}
+
+// Stick figure
+function StickFigure({ position = new THREE.Vector3() }){
+  return (
+    <group position={position}>
+      <mesh position={[0,1.6,0]}>
+        <sphereGeometry args={[0.18, 16, 16]} />
+        <meshStandardMaterial color={'#f5dab1'} roughness={0.9} />
+      </mesh>
+      <mesh position={[0,0.95,0]}>
+        <cylinderGeometry args={[0.22,0.25,0.7,12]} />
+        <meshStandardMaterial color={'#4c7ac7'} roughness={0.9} />
+      </mesh>
+      <mesh position={[0,0.45,0]}>
+        <cylinderGeometry args={[0.18,0.2,0.8,12]} />
+        <meshStandardMaterial color={'#2c2c2c'} roughness={0.95} />
+      </mesh>
+      <mesh position={[-0.25,1.0,0]} rotation-z={Math.PI/4}>
+        <cylinderGeometry args={[0.05,0.05,0.6,8]} />
+        <meshStandardMaterial color={'#4c7ac7'} />
+      </mesh>
+      <mesh position={[0.25,1.0,0]} rotation-z={-Math.PI/4}>
+        <cylinderGeometry args={[0.05,0.05,0.6,8]} />
+        <meshStandardMaterial color={'#4c7ac7'} />
+      </mesh>
+      <mesh position={[-0.12,0.1,0]} rotation-z={-Math.PI/8}>
+        <cylinderGeometry args={[0.06,0.06,0.7,8]} />
+        <meshStandardMaterial color={'#2c2c2c'} />
+      </mesh>
+      <mesh position={[0.12,0.1,0]} rotation-z={Math.PI/8}>
+        <cylinderGeometry args={[0.06,0.06,0.7,8]} />
+        <meshStandardMaterial color={'#2c2c2c'} />
+      </mesh>
+    </group>
+  )
+}
+
+// Highway distance posts
+function MileMarkers(){
+  const ref = useRef<THREE.InstancedMesh>(null!)
+  const box = useMemo(()=> new THREE.BoxGeometry(0.2, 1.2, 0.2), [])
+  const mat = useMemo(()=> new THREE.MeshStandardMaterial({ color:'#c4b38a', roughness:0.9 }), [])
+  useEffect(()=>{
+    if (!ref.current) return
+    const dummy = new THREE.Object3D()
+    let i=0
+    for(let z=-90; z<=90; z+=10){
+      dummy.position.set(-2.5, duneHeight(-2.5, z)+0.6, z)
+      dummy.updateMatrix(); ref.current.setMatrixAt(i++, dummy.matrix)
+      dummy.position.set(2.5, duneHeight(2.5, z)+0.6, z)
+      dummy.updateMatrix(); ref.current.setMatrixAt(i++, dummy.matrix)
+    }
+    ref.current.count = i
+    ref.current.instanceMatrix.needsUpdate = true
+  },[])
+  return <instancedMesh ref={ref} args={[box, mat, 1000]} />
+}
+
+// Minimap canvas
+function MiniMap({ ox, oy, digs, player }:{ox:number,oy:number,digs:any[],player:{x:number,y:number}}){
+  const ref = useRef<HTMLCanvasElement>(null!)
+  useEffect(()=>{
+    const c = ref.current; if (!c) return
+    const ctx = c.getContext('2d')!
+    const w = c.width, h = c.height
+    ctx.clearRect(0,0,w,h)
+    // background sand
+    ctx.fillStyle = '#b8925c'; ctx.fillRect(0,0,w,h)
+    // dug cells
+    ctx.fillStyle = 'rgba(0,0,0,0.4)'
+    digs.forEach((d:any)=>{
+      const x = (d.x - ox) / VIEW_W * w
+      const y = (d.y - oy) / VIEW_H * h
+      ctx.fillRect(x, y, Math.max(2, w/VIEW_W), Math.max(2, h/VIEW_H))
+    })
+    // player
+    ctx.fillStyle = '#00e5ff'
+    const px = (player.x - ox) / VIEW_W * w
+    const py = (player.y - oy) / VIEW_H * h
+    ctx.beginPath(); ctx.arc(px, py, 4, 0, Math.PI*2); ctx.fill()
+    // grid border
+    ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.strokeRect(0,0,w,h)
+  },[ox,oy,digs,player])
+  return <canvas ref={ref} width={160} height={160} className="rounded-lg border border-white/10" />
+}
+
+// Desert surface & environment
 function Desert({ ox, oy, digsInView }:{ox:number,oy:number,digsInView:any[]}){
-  const sand = useTexture('/textures_desert/sand.jpg')
-  const sandNormal = useTexture('/textures_desert/sand_normal.jpg')
-  const rock = useTexture('/textures_desert/rock.jpg')
-  const bushTex = useTexture('/textures_desert/bush.png')
-  const sky = useTexture('/textures_desert/sky.jpg')
+  const sand = useTexture('/textures_desert_plus/sand.jpg')
+  const sandNormal = useTexture('/textures_desert_plus/sand_normal.jpg')
+  const rock = useTexture('/textures_desert_plus/rock.jpg')
+  const bushTex = useTexture('/textures_desert_plus/bush.png')
+  const sky = useTexture('/textures_desert_plus/sky_warm.jpg')
 
   const { scene, gl } = useThree()
   useEffect(()=>{
@@ -153,13 +272,12 @@ function Desert({ ox, oy, digsInView }:{ox:number,oy:number,digsInView:any[]}){
   ;[sand, sandNormal, rock].forEach((t:any)=>{ t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(20,20); t.anisotropy = 8 })
 
   const groundGeom = useMemo(()=>{
-    const size = 200
-    const segs = 200
+    const size = 200, segs = 200
     const geom = new THREE.PlaneGeometry(size, size, segs, segs)
     const pos = geom.attributes.position as THREE.BufferAttribute
     for (let i=0;i<pos.count;i++){
       const vx = pos.getX(i)
-      const vz = pos.getY(i) // plane is XY before rotation
+      const vz = pos.getY(i)
       const h = duneHeight(vx, vz)
       pos.setZ(i, h)
     }
@@ -170,24 +288,20 @@ function Desert({ ox, oy, digsInView }:{ox:number,oy:number,digsInView:any[]}){
 
   const rockGeom = useMemo(()=> new THREE.DodecahedronGeometry(0.5, 0), [])
   const bushGeom = useMemo(()=> new THREE.PlaneGeometry(1,1), [])
-  const cactusGeom = useMemo(()=> new THREE.CylinderGeometry(0.12, 0.14, 2.2, 8), [])
 
   const groundMat = useMemo(()=> new THREE.MeshStandardMaterial({
     map: sand as THREE.Texture, normalMap: sandNormal as THREE.Texture, roughness: 1.0, metalness: 0.0
   }), [sand, sandNormal])
   const rockMat = useMemo(()=> new THREE.MeshStandardMaterial({ map: rock as THREE.Texture, roughness: 0.9 }), [rock])
   const bushMat = useMemo(()=> new THREE.MeshBasicMaterial({ map: bushTex as THREE.Texture, transparent: true, depthWrite: false }), [bushTex])
-  const cactusMat = useMemo(()=> new THREE.MeshStandardMaterial({ color: '#3a8f2b', roughness: 0.8 }), [])
 
-  // scatter instances
   const rocks = useRef<THREE.InstancedMesh>(null!)
   const bushes = useRef<THREE.InstancedMesh>(null!)
-  const cacti = useRef<THREE.InstancedMesh>(null!)
 
   useEffect(()=>{
-    if (!rocks.current || !bushes.current || !cacti.current) return
+    if (!rocks.current || !bushes.current) return
     const dummy = new THREE.Object3D()
-    let ri=0, bi=0, ci=0
+    let ri=0, bi=0
     for (let i=0;i<800;i++){
       const x = (Math.random()-0.5)*180
       const z = (Math.random()-0.5)*180
@@ -196,8 +310,7 @@ function Desert({ ox, oy, digsInView }:{ox:number,oy:number,digsInView:any[]}){
       dummy.rotation.set(0, Math.random()*Math.PI*2, 0)
       const s = 0.4 + Math.random()*0.8
       dummy.scale.set(s,s,s)
-      dummy.updateMatrix()
-      rocks.current.setMatrixAt(ri++, dummy.matrix)
+      dummy.updateMatrix(); rocks.current.setMatrixAt(ri++, dummy.matrix)
     }
     for (let i=0;i<600;i++){
       const x = (Math.random()-0.5)*180
@@ -207,23 +320,10 @@ function Desert({ ox, oy, digsInView }:{ox:number,oy:number,digsInView:any[]}){
       dummy.rotation.set(0, Math.random()*Math.PI*2, 0)
       const s = 1 + Math.random()*1.5
       dummy.scale.set(s, s, 1)
-      dummy.updateMatrix()
-      bushes.current.setMatrixAt(bi++, dummy.matrix)
-    }
-    for (let i=0;i<150;i++){
-      const x = (Math.random()-0.5)*180
-      const z = (Math.random()-0.5)*180
-      const y = duneHeight(x, z)
-      dummy.position.set(x, y+1.1, z)
-      dummy.rotation.set(0, Math.random()*Math.PI*2, 0)
-      const s = 0.8 + Math.random()*0.8
-      dummy.scale.set(1,s,1)
-      dummy.updateMatrix()
-      cacti.current.setMatrixAt(ci++, dummy.matrix)
+      dummy.updateMatrix(); bushes.current.setMatrixAt(bi++, dummy.matrix)
     }
     rocks.current.count = ri; rocks.current.instanceMatrix.needsUpdate = true
     bushes.current.count = bi; bushes.current.instanceMatrix.needsUpdate = true
-    cacti.current.count = ci; cacti.current.instanceMatrix.needsUpdate = true
   }, [])
 
   return (
@@ -231,7 +331,7 @@ function Desert({ ox, oy, digsInView }:{ox:number,oy:number,digsInView:any[]}){
       <mesh geometry={groundGeom} material={groundMat} rotation-x={-Math.PI/2} receiveShadow castShadow />
       <instancedMesh ref={rocks} args={[rockGeom, rockMat, 1000]} castShadow receiveShadow />
       <instancedMesh ref={bushes} args={[bushGeom, bushMat, 800]} castShadow={false} receiveShadow={false} rotation-y={Math.PI/4} />
-      <instancedMesh ref={cacti} args={[cactusGeom, cactusMat, 200]} castShadow receiveShadow />
+      <MileMarkers />
       {digsInView.map(d => (
         <Html key={`${d.x},${d.y}`} center transform distanceFactor={25}
           position={[(d.x - ox - VIEW_W/2), duneHeight(d.x - ox - VIEW_W/2, d.y - oy - VIEW_H/2)+0.3, (d.y - oy - VIEW_H/2)]}>
@@ -239,12 +339,13 @@ function Desert({ ox, oy, digsInView }:{ox:number,oy:number,digsInView:any[]}){
             style={{ textShadow: '0 0 6px rgba(255,220,120,0.8)' }}>{d.initials}</div>
         </Html>
       ))}
+      <Dust count={1500} />
     </group>
   )
 }
 
-// --- Controls: FP movement with pointer lock; updates ox/oy as you walk ---
-function DesertControls({ setHovered, setOff }:{ setHovered:(v:any)=>void, setOff:(fn:(o:{ox:number,oy:number})=>{ox:number,oy:number})=>void }){
+// Controls + 1st/3rd person
+function Controls({ mode, setHovered, setOff, playerPos }:{mode:'fp'|'tp', setHovered:(v:any)=>void, setOff:(fn:(o:{ox:number,oy:number})=>{ox:number,oy:number})=>void, playerPos:THREE.Vector3}){
   const { camera } = useThree()
   const keys = useRef<{[k:string]:boolean}>({})
   const velocity = useRef(new THREE.Vector3())
@@ -253,9 +354,13 @@ function DesertControls({ setHovered, setOff }:{ setHovered:(v:any)=>void, setOf
   const plane = useMemo(()=>new THREE.Plane(new THREE.Vector3(0,1,0), 0),[])
 
   useEffect(()=>{
-    camera.position.set(0, 1.7, 6)
+    if (mode==='fp'){
+      camera.position.set(0, 1.7, 6)
+    } else {
+      camera.position.set(0, 2.0, 6)
+    }
     camera.lookAt(0,1.6,0)
-  }, [camera])
+  }, [camera, mode])
 
   useEffect(()=>{
     const down = (e:KeyboardEvent)=>{ keys.current[e.key.toLowerCase()] = true }
@@ -273,33 +378,44 @@ function DesertControls({ setHovered, setOff }:{ setHovered:(v:any)=>void, setOf
     if (keys.current['a']) dir.current.x -= 1
     if (keys.current['d']) dir.current.x += 1
     dir.current.normalize()
-    const speed = (keys.current['shift']) ? 16 : 8
+    const sprint = keys.current['shift']
+    const speed = sprint ? 16 : 8
     velocity.current.copy(dir.current).applyQuaternion(camera.quaternion).multiplyScalar(speed*delta)
+
+    // move camera
     camera.position.add(new THREE.Vector3(velocity.current.x, 0, velocity.current.z))
-    // keep camera slightly above dune height
-    const y = duneHeight(camera.position.x, camera.position.z) + 1.7
+    const y = duneHeight(camera.position.x, camera.position.z) + (mode==='fp'?1.7:2.2)
     camera.position.y = THREE.MathUtils.lerp(camera.position.y, y, 0.6)
 
-    // update world window offsets so digging maps to where we walk
+    // update player position (for third-person and minimap)
+    playerPos.set(camera.position.x, 0, camera.position.z)
+
+    // if third-person, offset camera back & up but keep facing forward
+    if (mode==='tp'){
+      const back = new THREE.Vector3(0,0, -3).applyQuaternion(camera.quaternion)
+      const look = new THREE.Vector3().copy(playerPos)
+      camera.position.copy(playerPos).add(new THREE.Vector3(0,1.6,0)).add(back)
+      camera.lookAt(look.x, duneHeight(look.x, look.z)+1.6, look.z)
+    }
+
+    // update offsets for digging window
     setOff(o=>{
       const nx = clamp(Math.floor(o.ox + velocity.current.x), 0, WORLD_W - VIEW_W)
       const ny = clamp(Math.floor(o.oy + velocity.current.z), 0, WORLD_H - VIEW_H)
       return (nx!==o.ox || ny!==o.oy) ? {ox:nx, oy:ny} : o
     })
 
-    // update hovered from crosshair
+    // hovered via center ray
     raycaster.setFromCamera(new THREE.Vector2(0,0), camera as any)
     const p = new THREE.Vector3()
     raycaster.ray.intersectPlane(plane, p)
     const gx = Math.round(p.x + VIEW_W/2)
     const gy = Math.round(p.z + VIEW_H/2)
-    const wx = clamp(gx, 0, WORLD_W-1)
-    const wy = clamp(gy, 0, WORLD_H-1)
-    if (gx>=0 && gx<VIEW_W && gy>=0 && gy<VIEW_H) setHovered({ x: wx, y: wy })
+    if (gx>=0 && gx<VIEW_W && gy>=0 && gy<VIEW_H) setHovered({ x: gx, y: gy })
     else setHovered(null)
   })
 
-  return <PointerLockControls selector="#enter-desert" />
+  return null
 }
 
 export default function App(){
@@ -309,10 +425,13 @@ export default function App(){
   const [digs, setDigs] = useState<any[]>([])
   const [freeLeft, setFreeLeft] = useState(DAILY_FREE_DIGS)
   const [extraLeft, setExtraLeft] = useState(0)
+  const [mode, setMode] = useState<'fp'|'tp'>('fp')
+  const [showMap, setShowMap] = useState(false)
   const ended = gameEnded()
 
-  useEffect(()=>{ setUser(getOrCreateUser()); const a=canDigToday(); setFreeLeft(a.freeLeft); setExtraLeft(a.extraLeft) },[])
+  const playerPos = useRef(new THREE.Vector3(0,0,0))
 
+  useEffect(()=>{ setUser(getOrCreateUser()); const a=canDigToday(); setFreeLeft(a.freeLeft); setExtraLeft(a.extraLeft) },[])
   useEffect(()=>{
     let mounted = true
     api.fetchWindow(ox,oy,VIEW_W,VIEW_H).then(res=>mounted && setDigs(res))
@@ -322,30 +441,42 @@ export default function App(){
 
   const handleDig = async()=>{
     if (!hovered) return
-    const res = await api.dig(hovered.x, hovered.y)
+    const res = await api.dig(ox+hovered.x, oy+hovered.y)
     if (!res.ok){ alert(res.reason); return }
     if (res.found) alert('🎉 YOU FOUND THE TREASURE! The game is over.')
     const a = canDigToday(); setFreeLeft(a.freeLeft); setExtraLeft(a.extraLeft)
     const win = await api.fetchWindow(ox,oy,VIEW_W,VIEW_H); setDigs(win)
   }
 
+  // Mobile controls: visible if no pointer lock capability
+  const [mobileForward, setMobileForward] = useState(false)
+  useEffect(()=>{
+    const onPointerLock = ()=>{ /* noop; r3f manages lock via controls */ }
+    document.addEventListener('pointerlockchange', onPointerLock)
+    return ()=>document.removeEventListener('pointerlockchange', onPointerLock)
+  }, [])
+
   return (
     <div className="min-h-screen w-full" style={{ background: '#0b0f14', color: 'white' }}>
-      <header className="flex items-center justify-between p-4 md:p-6 border-b border-cyan-500/20 sticky top-0 z-20" style={{ background: '#0b0f14CC', backdropFilter:'blur(6px)' }}>
-        <h1 className="text-xl md:text-2xl font-extrabold tracking-tight">CYBER HUNT<span className="text-cyan-400">.</span></h1>
-        <button id="enter-desert" className="rounded px-3 py-2 bg-cyan-600 hover:bg-cyan-500">Click to enter Desert View</button>
+      <header className="flex items-center justify-between p-4 md:p-6 border-b border-amber-500/20 sticky top-0 z-20" style={{ background: '#0b0f14CC', backdropFilter:'blur(6px)' }}>
+        <h1 className="text-xl md:text-2xl font-extrabold tracking-tight">CYBER HUNT<span className="text-amber-400">.</span></h1>
+        <div className="flex items-center gap-2">
+          <button id="enter-desert" className="rounded px-3 py-2 bg-amber-600 hover:bg-amber-500">Click to enter Desert View</button>
+          <button className="rounded px-3 py-2 bg-white/10 hover:bg-white/20" onClick={()=>setMode(m=>m==='fp'?'tp':'fp')}>{mode==='fp'?'3rd person':'1st person'}</button>
+          <button className="rounded px-3 py-2 bg-white/10 hover:bg-white/20" onClick={()=>setShowMap(s=>!s)}>{showMap?'Hide Map':'Map'}</button>
+        </div>
       </header>
 
       <main className="grid md:grid-cols-[320px_1fr] gap-4 md:gap-6 p-4 md:p-6">
-        <div className="bg-[#0e141c] border border-cyan-500/20 rounded-2xl p-4 md:p-6">
+        <div className="bg-[#0e141c] border border-amber-500/20 rounded-2xl p-4 md:p-6">
           <div className="space-y-4">
             <div>
               <div className="text-sm text-white/60">Player</div>
               <div className="text-lg font-semibold">{user?.initials || 'YOU'}</div>
             </div>
             <div className="grid grid-cols-2 gap-2 text-center">
-              <div className="rounded-xl bg-cyan-500/10 p-3">
-                <div className="text-2xl font-bold text-cyan-300">{freeLeft}</div>
+              <div className="rounded-xl bg-amber-500/10 p-3">
+                <div className="text-2xl font-bold text-amber-300">{freeLeft}</div>
                 <div className="text-xs text-white/60">Free digs today</div>
               </div>
               <div className="rounded-xl bg-fuchsia-500/10 p-3">
@@ -353,24 +484,64 @@ export default function App(){
                 <div className="text-xs text-white/60">Extra digs</div>
               </div>
             </div>
-            <div className="text-sm text-white/70">Click the button above to lock the mouse. Use <b>W/A/S/D</b> to walk, <b>Shift</b> to sprint. Click <b>DIG</b> to excavate the tile under the crosshair.</div>
-            <button onClick={handleDig} className="mt-2 bg-cyan-600 hover:bg-cyan-500 w-full rounded-lg px-3 py-2 font-semibold">DIG</button>
+            <div className="text-sm text-white/70">Click the button above to lock the mouse. Use <b>W/A/S/D</b> (Shift = sprint). On phone, use the on‑screen controls. Click <b>DIG</b> to excavate under the crosshair.</div>
+            <button onClick={handleDig} className="mt-2 bg-amber-600 hover:bg-amber-500 w-full rounded-lg px-3 py-2 font-semibold">DIG</button>
+
+            <div className="pt-4 border-t border-white/10">
+              <div className="text-xs text-white/50 mb-2">Mini Map (current window)</div>
+              <MiniMap ox={ox} oy={oy} digs={digs} player={{ x: ox + VIEW_W/2 + playerPos.current.x, y: oy + VIEW_H/2 + playerPos.current.z }} />
+            </div>
+
             <div className="text-xs text-white/40 pt-2">
-              {ended ? <div className="text-fuchsia-300">Game ended. Treasure found at ({ended.x}, {ended.y}).</div> : <div>Find the hidden cache. First to hit the exact square wins. 🏴‍☠️</div>}
+              {ended ? <div className="text-amber-300">Game ended. Treasure found at ({ended.x}, {ended.y}).</div> : <div>Find the hidden cache. First to hit the exact square wins. 🏴‍☠️</div>}
             </div>
           </div>
         </div>
 
-        <div className="relative rounded-2xl overflow-hidden border border-cyan-500/20" style={{ height: '70vh' }}>
+        <div className="relative rounded-2xl overflow-hidden border border-amber-500/20" style={{ height: '70vh' }}>
           <Canvas shadows camera={{ fov: 70 }}>
-            <hemisphereLight skyColor={'#ffe'} groundColor={'#885'} intensity={0.6} />
-            <directionalLight position={[12, 30, -12]} intensity={1.2} castShadow shadow-mapSize-width={2048} shadow-mapSize-height={2048} />
-            <DesertControls setHovered={setHovered} setOff={setOff} />
+            <hemisphereLight skyColor={'#ffe'} groundColor={'#a86'} intensity={0.7} />
+            <directionalLight position={[18, 28, -12]} intensity={1.3} color={'#ffcf8a'} castShadow shadow-mapSize-width={2048} shadow-mapSize-height={2048} />
+
+            <Controls mode={mode} setHovered={setHovered} setOff={setOff} playerPos={playerPos.current} />
             <Desert ox={ox} oy={oy} digsInView={digs} />
+
+            {mode==='tp' && <StickFigure position={playerPos.current.clone().setY(0)} />}
+
+            {/* Post effects for golden hour glow + a bit of noise shimmer */}
+            <EffectComposer disableNormalPass>
+              <Bloom mipmapBlur intensity={0.35} luminanceThreshold={0.8} />
+              <Noise opacity={0.03} />
+              <Vignette eskil={false} offset={0.1} darkness={0.6} />
+            </EffectComposer>
+
+            <PointerLockControls selector="#enter-desert" />
             <Html center>
               <div style={{ width: 10, height: 10, borderRadius: 9999, border: '2px solid rgba(255,255,255,0.9)' }}></div>
             </Html>
           </Canvas>
+
+          {/* Mobile controls */}
+          <div className="absolute bottom-3 right-3 flex gap-2 md:hidden">
+            <button className="px-4 py-3 rounded bg-white/10" onTouchStart={()=>{(window as any).__mobile='left'}} onTouchEnd={()=>{(window as any).__mobile=null}}>⟲</button>
+            <button className="px-4 py-3 rounded bg-amber-600">MOVE</button>
+            <button className="px-4 py-3 rounded bg-white/10" onTouchStart={()=>{(window as any).__mobile='right'}} onTouchEnd={()=>{(window as any).__mobile=null}}>⟳</button>
+          </div>
+
+          {/* Full Map overlay */}
+          {showMap && (
+            <div className="absolute inset-0 bg-black/70 backdrop-blur p-4">
+              <div className="bg-black/40 rounded-xl p-4 h-full flex flex-col">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-white/80 font-semibold">World Map — current window</div>
+                  <button className="px-3 py-1 rounded bg-white/10 hover:bg-white/20" onClick={()=>setShowMap(false)}>Close</button>
+                </div>
+                <div className="flex-1 grid place-items-center">
+                  <MiniMap ox={ox} oy={oy} digs={digs} player={{ x: ox + VIEW_W/2 + playerPos.current.x, y: oy + VIEW_H/2 + playerPos.current.z }} />
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </main>
     </div>
