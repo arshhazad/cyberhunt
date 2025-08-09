@@ -4,10 +4,18 @@ import { Canvas, useThree, useFrame } from '@react-three/fiber'
 import { Html, PointerLockControls, useTexture } from '@react-three/drei'
 import * as THREE from 'three'
 
+/**
+ * Cyber Hunt — Desert Pack
+ * - Large desert with dunes (procedural), rocks, bushes, cacti
+ * - First-person movement (WASD, Shift to sprint). Click the header button to lock mouse.
+ * - Click DIG to excavate the 1x1 ft tile under the crosshair
+ * - Keeps treasure/digging logic and 10M sq ft world size
+ */
+
 const WORLD_W = 3163
 const WORLD_H = 3162
-const VIEW_W = 160
-const VIEW_H = 160
+const VIEW_W = 200
+const VIEW_H = 200
 const DAILY_FREE_DIGS = 1
 
 const KEY = {
@@ -117,15 +125,21 @@ const api = {
   }
 }
 
-// ---------- Street Scene ----------
+// ---------- Desert scene ----------
 
-function Street({ ox, oy, digsInView }:{ox:number,oy:number,digsInView:any[]}){
-  const asphalt = useTexture('/textures_street_v2/asphalt.jpg')
-  const sidewalk = useTexture('/textures_street_v2/sidewalk.jpg')
-  const curb = useTexture('/textures_street_v2/curb.jpg')
-  const facade = useTexture('/textures_street_v2/facade.jpg')
-  const lanes = useTexture('/textures_street_v2/lanes.png')
-  const sky = useTexture('/textures_street_v2/sky.jpg')
+// dune height function (deterministic)
+function duneHeight(x:number, z:number){
+  const f1 = Math.sin(x*0.06) * 0.6 + Math.cos(z*0.05) * 0.6
+  const f2 = Math.sin((x+z)*0.025) * 0.4 + Math.cos((x-z)*0.018) * 0.35
+  return (f1 + f2) * 0.6
+}
+
+function Desert({ ox, oy, digsInView }:{ox:number,oy:number,digsInView:any[]}){
+  const sand = useTexture('/textures_desert/sand.jpg')
+  const sandNormal = useTexture('/textures_desert/sand_normal.jpg')
+  const rock = useTexture('/textures_desert/rock.jpg')
+  const bushTex = useTexture('/textures_desert/bush.png')
+  const sky = useTexture('/textures_desert/sky.jpg')
 
   const { scene, gl } = useThree()
   useEffect(()=>{
@@ -134,158 +148,120 @@ function Street({ ox, oy, digsInView }:{ox:number,oy:number,digsInView:any[]}){
     scene.background = tex
     gl.toneMapping = THREE.ACESFilmicToneMapping
     gl.toneMappingExposure = 1.0
-    gl.shadowMap.enabled = true
   },[scene, gl, sky])
 
-  ;[asphalt, sidewalk, facade].forEach((t:any)=>{ t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(6,6); t.anisotropy = 8 })
+  ;[sand, sandNormal, rock].forEach((t:any)=>{ t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(20,20); t.anisotropy = 8 })
 
-  const plane = useMemo(()=> new THREE.PlaneGeometry(1,1), [])
-  const longPlane = useMemo(()=> new THREE.PlaneGeometry(1,0.2), [])
-  const curbGeom = useMemo(()=> new THREE.BoxGeometry(1,0.15,0.3), [])
-  const bldgGeom = useMemo(()=> new THREE.BoxGeometry(1.5, 6, 1.2), [])
-  const palmTrunk = useMemo(()=> new THREE.CylinderGeometry(0.06, 0.09, 3, 8), [])
-  const palmLeaf = useMemo(()=> new THREE.BoxGeometry(0.05, 0.6, 0.2), [])
-
-  const roadMat = useMemo(()=> new THREE.MeshStandardMaterial({ map: asphalt, roughness:0.95, metalness:0.02 }), [asphalt])
-  const walkMat = useMemo(()=> new THREE.MeshStandardMaterial({ map: sidewalk, roughness:1, metalness:0 }), [sidewalk])
-  const curbMat = useMemo(()=> new THREE.MeshStandardMaterial({ map: curb, roughness:1, metalness:0 }), [curb])
-  const lineMat = useMemo(()=> new THREE.MeshBasicMaterial({ map: lanes, transparent:true, opacity:0.95 }), [lanes])
-  const bldgMat = useMemo(()=> new THREE.MeshStandardMaterial({ map: facade, roughness:0.7, metalness:0.1, emissive:'#171821', emissiveIntensity:0.25 }), [facade])
-  const palmMat = useMemo(()=> new THREE.MeshStandardMaterial({ color:'#3a2d1f' }), [])
-  const leafMat = useMemo(()=> new THREE.MeshStandardMaterial({ color:'#1faa59' }), [])
-
-  const roads = useRef<THREE.InstancedMesh>(null!)
-  const walksL = useRef<THREE.InstancedMesh>(null!)
-  const walksR = useRef<THREE.InstancedMesh>(null!)
-  const lines = useRef<THREE.InstancedMesh>(null!)
-  const curbsL = useRef<THREE.InstancedMesh>(null!)
-  const curbsR = useRef<THREE.InstancedMesh>(null!)
-  const bldgsL = useRef<THREE.InstancedMesh>(null!)
-  const bldgsR = useRef<THREE.InstancedMesh>(null!)
-  const palmsL = useRef<THREE.InstancedMesh>(null!)
-  const palmsR = useRef<THREE.InstancedMesh>(null!)
-  const leavesL = useRef<THREE.InstancedMesh>(null!)
-  const leavesR = useRef<THREE.InstancedMesh>(null!)
-
-  const cells = VIEW_W*VIEW_H
-  useEffect(()=>{
-    ;[roads,walksL,walksR,lines,curbsL,curbsR,bldgsL,bldgsR,palmsL,palmsR,leavesL,leavesR].forEach(m=>{ if(m.current) m.current.count = cells })
-  },[cells])
-
-  useEffect(()=>{
-    if (!roads.current) return
-    const dummy = new THREE.Object3D()
-    let ri=0, wl=0, wr=0, li=0, cl=0, cr=0, bl=0, br=0, pl=0, pr=0, ll=0, lr=0
-
-    for (let yy=0; yy<VIEW_H; yy++){
-      const z = (yy - VIEW_H/2)
-      // road & strips
-      for (let xx=0; xx<VIEW_W; xx++){
-        // Road
-        dummy.position.set(0, 0, z)
-        dummy.rotation.set(-Math.PI/2,0,0); dummy.scale.set(6,1,1)
-        dummy.updateMatrix(); roads.current!.setMatrixAt(ri++, dummy.matrix)
-        // Lines
-        dummy.position.set(0, 0.002, z)
-        dummy.updateMatrix(); lines.current!.setMatrixAt(li++, dummy.matrix)
-        // sidewalks
-        dummy.rotation.set(-Math.PI/2,0,0); dummy.scale.set(2,1,1)
-        dummy.position.set(-4, 0.001, z); dummy.updateMatrix(); walksL.current!.setMatrixAt(wl++, dummy.matrix)
-        dummy.position.set( 4, 0.001, z); dummy.updateMatrix(); walksR.current!.setMatrixAt(wr++, dummy.matrix)
-        // curbs
-        dummy.rotation.set(0,0,0); dummy.scale.set(2,1,1)
-        dummy.position.set(-3, 0.075, z); dummy.updateMatrix(); curbsL.current!.setMatrixAt(cl++, dummy.matrix)
-        dummy.position.set( 3, 0.075, z); dummy.updateMatrix(); curbsR.current!.setMatrixAt(cr++, dummy.matrix)
-      }
-      // buildings/palms at intervals
-      if (yy % 6 === 0){
-        const hL = 5 + seeded(0,yy)*8
-        dummy.position.set(-5.5, hL/2, z)
-        dummy.rotation.set(0, seeded(7,yy+3)*Math.PI*2, 0)
-        dummy.scale.set(1.5, hL, 1.2)
-        dummy.updateMatrix(); bldgsL.current!.setMatrixAt(bl++, dummy.matrix)
-
-        const hR = 5 + seeded(13,yy+11)*8
-        dummy.position.set(5.5, hR/2, z)
-        dummy.rotation.set(0, seeded(17,yy+5)*Math.PI*2, 0)
-        dummy.scale.set(1.5, hR, 1.2)
-        dummy.updateMatrix(); bldgsR.current!.setMatrixAt(br++, dummy.matrix)
-      }
-      if (yy % 12 === 0){
-        dummy.position.set(-4.8, 1.5, z); dummy.rotation.set(0,0,0); dummy.scale.set(1,1,1)
-        dummy.updateMatrix(); palmsL.current!.setMatrixAt(pl++, dummy.matrix)
-        for (let k=0;k<6;k++){
-          const leaf = new THREE.Object3D()
-          leaf.position.set(-4.8, 3.0, z)
-          leaf.rotation.set(Math.PI/2.8, (k/6)*Math.PI*2, 0)
-          leaf.updateMatrix(); leavesL.current!.setMatrixAt(ll++, leaf.matrix)
-        }
-        dummy.position.set(4.8, 1.5, z); dummy.updateMatrix(); palmsR.current!.setMatrixAt(pr++, dummy.matrix)
-        for (let k=0;k<6;k++){
-          const leaf = new THREE.Object3D()
-          leaf.position.set(4.8, 3.0, z)
-          leaf.rotation.set(Math.PI/2.8, (k/6)*Math.PI*2, 0)
-          leaf.updateMatrix(); leavesR.current!.setMatrixAt(lr++, leaf.matrix)
-        }
-      }
+  const groundGeom = useMemo(()=>{
+    const size = 200
+    const segs = 200
+    const geom = new THREE.PlaneGeometry(size, size, segs, segs)
+    const pos = geom.attributes.position as THREE.BufferAttribute
+    for (let i=0;i<pos.count;i++){
+      const vx = pos.getX(i)
+      const vz = pos.getY(i) // plane is XY before rotation
+      const h = duneHeight(vx, vz)
+      pos.setZ(i, h)
     }
+    pos.needsUpdate = true
+    geom.computeVertexNormals()
+    return geom
+  },[])
 
-    roads.current.count = ri
-    walksL.current.count = wl; walksR.current.count = wr
-    lines.current.count = li
-    curbsL.current.count = cl; curbsR.current.count = cr
-    bldgsL.current.count = bl; bldgsR.current.count = br
-    palmsL.current.count = pl; palmsR.current.count = pr
-    leavesL.current.count = ll; leavesR.current.count = lr
+  const rockGeom = useMemo(()=> new THREE.DodecahedronGeometry(0.5, 0), [])
+  const bushGeom = useMemo(()=> new THREE.PlaneGeometry(1,1), [])
+  const cactusGeom = useMemo(()=> new THREE.CylinderGeometry(0.12, 0.14, 2.2, 8), [])
 
-    ;[roads,walksL,walksR,lines,curbsL,curbsR,bldgsL,bldgsR,palmsL,palmsR,leavesL,leavesR].forEach(r=>{
-      r.current.instanceMatrix.needsUpdate = true
-    })
-  },[ox,oy])
+  const groundMat = useMemo(()=> new THREE.MeshStandardMaterial({
+    map: sand as THREE.Texture, normalMap: sandNormal as THREE.Texture, roughness: 1.0, metalness: 0.0
+  }), [sand, sandNormal])
+  const rockMat = useMemo(()=> new THREE.MeshStandardMaterial({ map: rock as THREE.Texture, roughness: 0.9 }), [rock])
+  const bushMat = useMemo(()=> new THREE.MeshBasicMaterial({ map: bushTex as THREE.Texture, transparent: true, depthWrite: false }), [bushTex])
+  const cactusMat = useMemo(()=> new THREE.MeshStandardMaterial({ color: '#3a8f2b', roughness: 0.8 }), [])
+
+  // scatter instances
+  const rocks = useRef<THREE.InstancedMesh>(null!)
+  const bushes = useRef<THREE.InstancedMesh>(null!)
+  const cacti = useRef<THREE.InstancedMesh>(null!)
+
+  useEffect(()=>{
+    if (!rocks.current || !bushes.current || !cacti.current) return
+    const dummy = new THREE.Object3D()
+    let ri=0, bi=0, ci=0
+    for (let i=0;i<800;i++){
+      const x = (Math.random()-0.5)*180
+      const z = (Math.random()-0.5)*180
+      const y = duneHeight(x, z)
+      dummy.position.set(x, y+0.1, z)
+      dummy.rotation.set(0, Math.random()*Math.PI*2, 0)
+      const s = 0.4 + Math.random()*0.8
+      dummy.scale.set(s,s,s)
+      dummy.updateMatrix()
+      rocks.current.setMatrixAt(ri++, dummy.matrix)
+    }
+    for (let i=0;i<600;i++){
+      const x = (Math.random()-0.5)*180
+      const z = (Math.random()-0.5)*180
+      const y = duneHeight(x, z)
+      dummy.position.set(x, y+0.05, z)
+      dummy.rotation.set(0, Math.random()*Math.PI*2, 0)
+      const s = 1 + Math.random()*1.5
+      dummy.scale.set(s, s, 1)
+      dummy.updateMatrix()
+      bushes.current.setMatrixAt(bi++, dummy.matrix)
+    }
+    for (let i=0;i<150;i++){
+      const x = (Math.random()-0.5)*180
+      const z = (Math.random()-0.5)*180
+      const y = duneHeight(x, z)
+      dummy.position.set(x, y+1.1, z)
+      dummy.rotation.set(0, Math.random()*Math.PI*2, 0)
+      const s = 0.8 + Math.random()*0.8
+      dummy.scale.set(1,s,1)
+      dummy.updateMatrix()
+      cacti.current.setMatrixAt(ci++, dummy.matrix)
+    }
+    rocks.current.count = ri; rocks.current.instanceMatrix.needsUpdate = true
+    bushes.current.count = bi; bushes.current.instanceMatrix.needsUpdate = true
+    cacti.current.count = ci; cacti.current.instanceMatrix.needsUpdate = true
+  }, [])
 
   return (
     <group>
-      <instancedMesh ref={roads} args={[plane, roadMat, VIEW_W*VIEW_H]} receiveShadow />
-      <instancedMesh ref={lines} args={[longPlane, lineMat, VIEW_W*VIEW_H]} />
-      <instancedMesh ref={walksL} args={[plane, walkMat, VIEW_W*VIEW_H]} receiveShadow />
-      <instancedMesh ref={walksR} args={[plane, walkMat, VIEW_W*VIEW_H]} receiveShadow />
-      <instancedMesh ref={curbsL} args={[curbGeom, curbMat, VIEW_W*VIEW_H]} receiveShadow />
-      <instancedMesh ref={curbsR} args={[curbGeom, curbMat, VIEW_W*VIEW_H]} receiveShadow />
-      <instancedMesh ref={bldgsL} args={[bldgGeom, bldgMat, VIEW_W*VIEW_H]} castShadow receiveShadow />
-      <instancedMesh ref={bldgsR} args={[bldgGeom, bldgMat, VIEW_W*VIEW_H]} castShadow receiveShadow />
-      <instancedMesh ref={palmsL} args={[palmTrunk, palmMat, VIEW_W*VIEW_H]} castShadow receiveShadow />
-      <instancedMesh ref={palmsR} args={[palmTrunk, palmMat, VIEW_W*VIEW_H]} castShadow receiveShadow />
-      <instancedMesh ref={leavesL} args={[palmLeaf, leafMat, VIEW_W*VIEW_H]} receiveShadow />
-      <instancedMesh ref={leavesR} args={[palmLeaf, leafMat, VIEW_W*VIEW_H]} receiveShadow />
+      <mesh geometry={groundGeom} material={groundMat} rotation-x={-Math.PI/2} receiveShadow castShadow />
+      <instancedMesh ref={rocks} args={[rockGeom, rockMat, 1000]} castShadow receiveShadow />
+      <instancedMesh ref={bushes} args={[bushGeom, bushMat, 800]} castShadow={false} receiveShadow={false} rotation-y={Math.PI/4} />
+      <instancedMesh ref={cacti} args={[cactusGeom, cactusMat, 200]} castShadow receiveShadow />
       {digsInView.map(d => (
-        <Html key={`${d.x},${d.y}`} center transform distanceFactor={20}
-          position={[(0), 0.05, (d.y - oy - VIEW_H/2)]}>
-          <div className="text-[10px] md:text-xs tracking-widest font-bold text-cyan-300/90"
-            style={{ textShadow: '0 0 6px #00fff0' }}>{d.initials}</div>
+        <Html key={`${d.x},${d.y}`} center transform distanceFactor={25}
+          position={[(d.x - ox - VIEW_W/2), duneHeight(d.x - ox - VIEW_W/2, d.y - oy - VIEW_H/2)+0.3, (d.y - oy - VIEW_H/2)]}>
+          <div className="text-[10px] md:text-xs tracking-widest font-bold text-amber-200/90"
+            style={{ textShadow: '0 0 6px rgba(255,220,120,0.8)' }}>{d.initials}</div>
         </Html>
       ))}
     </group>
   )
 }
 
-function StreetControls({ setHovered, ox, oy }:{ setHovered:(v:any)=>void, ox:number, oy:number }){
-  const { camera, gl } = useThree()
+// --- Controls: FP movement with pointer lock; updates ox/oy as you walk ---
+function DesertControls({ setHovered, setOff }:{ setHovered:(v:any)=>void, setOff:(fn:(o:{ox:number,oy:number})=>{ox:number,oy:number})=>void }){
+  const { camera } = useThree()
+  const keys = useRef<{[k:string]:boolean}>({})
+  const velocity = useRef(new THREE.Vector3())
+  const dir = useRef(new THREE.Vector3())
   const raycaster = useMemo(()=>new THREE.Raycaster(),[])
   const plane = useMemo(()=>new THREE.Plane(new THREE.Vector3(0,1,0), 0),[])
-  const keys = useRef<{[k:string]:boolean}>({})
-  const v = useRef(new THREE.Vector3())
-  const dir = useRef(new THREE.Vector3())
 
   useEffect(()=>{
-    camera.position.set(0, 1.75, 8)
-    camera.lookAt(0,1.7,0)
-    gl.shadowMap.enabled = true
-  },[camera, gl])
+    camera.position.set(0, 1.7, 6)
+    camera.lookAt(0,1.6,0)
+  }, [camera])
 
   useEffect(()=>{
     const down = (e:KeyboardEvent)=>{ keys.current[e.key.toLowerCase()] = true }
     const up = (e:KeyboardEvent)=>{ keys.current[e.key.toLowerCase()] = false }
-    window.addEventListener('keydown', down); window.addEventListener('keyup', up)
+    window.addEventListener('keydown', down)
+    window.addEventListener('keyup', up)
     return ()=>{ window.removeEventListener('keydown', down); window.removeEventListener('keyup', up) }
   }, [])
 
@@ -297,26 +273,33 @@ function StreetControls({ setHovered, ox, oy }:{ setHovered:(v:any)=>void, ox:nu
     if (keys.current['a']) dir.current.x -= 1
     if (keys.current['d']) dir.current.x += 1
     dir.current.normalize()
-    v.current.copy(dir.current).applyQuaternion(camera.quaternion).multiplyScalar(6*delta)
-    camera.position.add(new THREE.Vector3(v.current.x, 0, v.current.z))
+    const speed = (keys.current['shift']) ? 16 : 8
+    velocity.current.copy(dir.current).applyQuaternion(camera.quaternion).multiplyScalar(speed*delta)
+    camera.position.add(new THREE.Vector3(velocity.current.x, 0, velocity.current.z))
+    // keep camera slightly above dune height
+    const y = duneHeight(camera.position.x, camera.position.z) + 1.7
+    camera.position.y = THREE.MathUtils.lerp(camera.position.y, y, 0.6)
+
+    // update world window offsets so digging maps to where we walk
+    setOff(o=>{
+      const nx = clamp(Math.floor(o.ox + velocity.current.x), 0, WORLD_W - VIEW_W)
+      const ny = clamp(Math.floor(o.oy + velocity.current.z), 0, WORLD_H - VIEW_H)
+      return (nx!==o.ox || ny!==o.oy) ? {ox:nx, oy:ny} : o
+    })
+
+    // update hovered from crosshair
+    raycaster.setFromCamera(new THREE.Vector2(0,0), camera as any)
+    const p = new THREE.Vector3()
+    raycaster.ray.intersectPlane(plane, p)
+    const gx = Math.round(p.x + VIEW_W/2)
+    const gy = Math.round(p.z + VIEW_H/2)
+    const wx = clamp(gx, 0, WORLD_W-1)
+    const wy = clamp(gy, 0, WORLD_H-1)
+    if (gx>=0 && gx<VIEW_W && gy>=0 && gy<VIEW_H) setHovered({ x: wx, y: wy })
+    else setHovered(null)
   })
 
-  useEffect(()=>{
-    const id = setInterval(()=>{
-      raycaster.setFromCamera(new THREE.Vector2(0,0), camera as any)
-      const p = new THREE.Vector3()
-      raycaster.ray.intersectPlane(plane, p)
-      const gx = Math.round(p.x + VIEW_W/2)
-      const gy = Math.round(p.z + VIEW_H/2)
-      const wx = clamp(ox + gx, 0, WORLD_W-1)
-      const wy = clamp(oy + gy, 0, WORLD_H-1)
-      if (gy>=0 && gy<VIEW_H) setHovered({ x: wx, y: wy })
-      else setHovered(null)
-    }, 50)
-    return ()=>clearInterval(id)
-  }, [camera, ox, oy, setHovered, raycaster, plane])
-
-  return <PointerLockControls selector="#enter-street" />
+  return <PointerLockControls selector="#enter-desert" />
 }
 
 export default function App(){
@@ -329,10 +312,12 @@ export default function App(){
   const ended = gameEnded()
 
   useEffect(()=>{ setUser(getOrCreateUser()); const a=canDigToday(); setFreeLeft(a.freeLeft); setExtraLeft(a.extraLeft) },[])
+
   useEffect(()=>{
-    let mounted=true
+    let mounted = true
     api.fetchWindow(ox,oy,VIEW_W,VIEW_H).then(res=>mounted && setDigs(res))
-    setOffset({ox,oy}); return ()=>{ mounted=false }
+    setOffset({ox,oy})
+    return ()=>{ mounted=false }
   },[ox,oy])
 
   const handleDig = async()=>{
@@ -348,7 +333,7 @@ export default function App(){
     <div className="min-h-screen w-full" style={{ background: '#0b0f14', color: 'white' }}>
       <header className="flex items-center justify-between p-4 md:p-6 border-b border-cyan-500/20 sticky top-0 z-20" style={{ background: '#0b0f14CC', backdropFilter:'blur(6px)' }}>
         <h1 className="text-xl md:text-2xl font-extrabold tracking-tight">CYBER HUNT<span className="text-cyan-400">.</span></h1>
-        <button id="enter-street" className="rounded px-3 py-2 bg-cyan-600 hover:bg-cyan-500">Click to enter Street View</button>
+        <button id="enter-desert" className="rounded px-3 py-2 bg-cyan-600 hover:bg-cyan-500">Click to enter Desert View</button>
       </header>
 
       <main className="grid md:grid-cols-[320px_1fr] gap-4 md:gap-6 p-4 md:p-6">
@@ -368,7 +353,7 @@ export default function App(){
                 <div className="text-xs text-white/60">Extra digs</div>
               </div>
             </div>
-            <div className="text-sm text-white/70">Click the button above to lock the mouse. Use <b>W/A/S/D</b> to walk. Click <b>DIG</b> to excavate the tile under the crosshair.</div>
+            <div className="text-sm text-white/70">Click the button above to lock the mouse. Use <b>W/A/S/D</b> to walk, <b>Shift</b> to sprint. Click <b>DIG</b> to excavate the tile under the crosshair.</div>
             <button onClick={handleDig} className="mt-2 bg-cyan-600 hover:bg-cyan-500 w-full rounded-lg px-3 py-2 font-semibold">DIG</button>
             <div className="text-xs text-white/40 pt-2">
               {ended ? <div className="text-fuchsia-300">Game ended. Treasure found at ({ended.x}, {ended.y}).</div> : <div>Find the hidden cache. First to hit the exact square wins. 🏴‍☠️</div>}
@@ -377,13 +362,11 @@ export default function App(){
         </div>
 
         <div className="relative rounded-2xl overflow-hidden border border-cyan-500/20" style={{ height: '70vh' }}>
-          <Canvas shadows camera={{ fov: 65 }}>
-            <hemisphereLight skyColor={'#9bb'} groundColor={'#223'} intensity={0.6} />
-            <directionalLight position={[12, 20, 6]} intensity={1.4} castShadow shadow-mapSize-width={2048} shadow-mapSize-height={2048} />
-
-            <StreetControls setHovered={setHovered} ox={ox} oy={oy} />
-            <Street ox={ox} oy={oy} digsInView={digs} />
-
+          <Canvas shadows camera={{ fov: 70 }}>
+            <hemisphereLight skyColor={'#ffe'} groundColor={'#885'} intensity={0.6} />
+            <directionalLight position={[12, 30, -12]} intensity={1.2} castShadow shadow-mapSize-width={2048} shadow-mapSize-height={2048} />
+            <DesertControls setHovered={setHovered} setOff={setOff} />
+            <Desert ox={ox} oy={oy} digsInView={digs} />
             <Html center>
               <div style={{ width: 10, height: 10, borderRadius: 9999, border: '2px solid rgba(255,255,255,0.9)' }}></div>
             </Html>
