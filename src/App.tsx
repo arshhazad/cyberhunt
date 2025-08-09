@@ -1,10 +1,8 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Canvas, useThree, useFrame } from '@react-three/fiber'
-import { Html, PointerLockControls, useTexture, shaderMaterial, Effects } from '@react-three/drei'
+import { Html, PointerLockControls, useTexture } from '@react-three/drei'
 import * as THREE from 'three'
-import { EffectComposer, Bloom, Noise, Vignette } from '@react-three/postprocessing'
-
 /** Desert Pack Plus
  * - Golden hour lighting + warm sky
  * - Dust particles
@@ -508,12 +506,8 @@ export default function App(){
 
             {mode==='tp' && <StickFigure position={playerPos.current.clone().setY(0)} />}
 
-            {/* Post effects for golden hour glow + a bit of noise shimmer */}
-            <EffectComposer disableNormalPass>
-              <Bloom mipmapBlur intensity={0.35} luminanceThreshold={0.8} />
-              <Noise opacity={0.03} />
-              <Vignette eskil={false} offset={0.1} darkness={0.6} />
-            </EffectComposer>
+            
+            
 
             <PointerLockControls selector="#enter-desert" />
             <Html center>
