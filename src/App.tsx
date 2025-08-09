@@ -520,8 +520,8 @@ export default function App(){
                 <div className="text-xs text-white/60">Extra digs</div>
               </div>
             </div>
-            <div className="text-sm text-white/70">Click the button above to lock the mouse. Use <b>W/A/S/D</b> (Shift = sprint). On phone, use the on‑screen controls. Click <b>DIG</b> to excavate under the crosshair.</div>
-            <button onClick={handleDig} className="mt-2 bg-amber-600 hover:bg-amber-500 w-full rounded-lg px-3 py-2 font-semibold">DIG</button>
+            <div className="text-sm text-white/70">Click the button above to lock the mouse. Use <b>W/A/S/D</b> (Shift = sprint). On phone, use the on‑screen controls. Click anywhere in the desert to dig at the highlighted spot.</div>
+            
 
             <div className="pt-4 border-t border-white/10">
               <div className="text-xs text-white/50 mb-2">Mini Map (current window)</div>
@@ -535,7 +535,7 @@ export default function App(){
         </div>
 
         <div className="relative rounded-2xl overflow-hidden border border-amber-500/20" style={{ height: '70vh' }}>
-          <Canvas shadows camera={{ fov: 70 }}>
+          <Canvas shadows camera={{ fov: 70 }} onPointerDown={handleDig}>
             <hemisphereLight skyColor={'#ffe'} groundColor={'#a86'} intensity={0.7} />
             <directionalLight position={[18, 28, -12]} intensity={1.3} color={'#ffcf8a'} castShadow shadow-mapSize-width={2048} shadow-mapSize-height={2048} />
 
